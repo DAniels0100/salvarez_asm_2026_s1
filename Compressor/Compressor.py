@@ -38,6 +38,23 @@ print(f"  Muestras usadas (2^k):      {N}  (2^{int(np.log2(N))})")
 print(f"  Duracion efectiva:          {N / fs:.3f} s")
 
 # =============================================================================
+# 1b. PRE-PROCESAMIENTO
+# =============================================================================
+# Paso 1 — Remover offset DC: el microfono introduce un bias constante que
+# aparece como X[0] con energia enorme. Sin esto el algoritmo desperdicia el
+# presupuesto del 95% en ese componente inutil.
+x = x - np.mean(x)
+
+# Paso 2 — Normalizar a [-1, 1]: garantiza que la señal ocupe el rango
+# completo independientemente del volumen de grabacion. Sin esto, una voz
+# grabada suavemente tiene energia muy pequena y los componentes seleccionados
+# producen una reconstruccion que visualmente parece "amplificada" porque sus
+# fases se suman constructivamente en ciertas regiones del bloque.
+pico = np.max(np.abs(x))
+if pico > 0:
+    x = x / pico
+
+# =============================================================================
 # 2. CALCULO DE LA FFT
 # =============================================================================
 # X[k] = sum_{n=0}^{N-1} x[n] * e^{-j*2*pi*k*n/N}
@@ -135,17 +152,34 @@ fig.suptitle(
 )
 gs = GridSpec(3, 2, figure=fig, hspace=0.52, wspace=0.38)
 
-# Mostrar los primeros 50 ms para apreciar la forma de onda
-muestra_fin = int(0.05 * fs)   # 50 ms = 2205 muestras a 44100 Hz
+# Buscar la ventana de 50 ms con mayor energia RMS en la señal original.
+# Los primeros 50 ms suelen ser silencio (antes de que el usuario hable),
+# lo que hace que la comparacion visual sea engañosa. Mostrar el segmento
+# mas activo da una comparacion honesta entre original y reconstruida.
+win_muestras = int(1.0 * fs)   # 1 s
+hop          = win_muestras // 4
+mejor_inicio = 0
+mejor_rms    = 0.0
+for inicio in range(0, N - win_muestras, hop):
+    rms = np.sqrt(np.mean(x[inicio : inicio + win_muestras] ** 2))
+    if rms > mejor_rms:
+        mejor_rms    = rms
+        mejor_inicio = inicio
+
+muestra_ini = mejor_inicio
+muestra_fin = mejor_inicio + win_muestras
+t_seg       = t[muestra_ini:muestra_fin]   # eje tiempo del segmento
+print(f"  Segmento mostrado:  {muestra_ini/fs:.3f} s – {muestra_fin/fs:.3f} s  (mayor energia RMS)")
 
 # ── 7.1  Señal original vs reconstruida (dominio tiempo) ─────────────────
 ax1 = fig.add_subplot(gs[0, :])
-ax1.plot(t[:muestra_fin], x[:muestra_fin],
+ax1.plot(t_seg, x[muestra_ini:muestra_fin],
          label='Original', color='steelblue', linewidth=1.2, alpha=0.9)
-ax1.plot(t[:muestra_fin], x_rec[:muestra_fin],
+ax1.plot(t_seg, x_rec[muestra_ini:muestra_fin],
          label=f'Reconstruida  (k = {k} coeficientes)',
          color='tomato', linewidth=1.2, linestyle='--')
-ax1.set_title("Señal de Audio Original vs Reconstruida (primeros 50 ms)")
+ax1.set_title(f"Señal de Audio Original vs Reconstruida  "
+              f"(1 s de mayor energía: {muestra_ini/fs:.2f}s – {muestra_fin/fs:.2f}s)")
 ax1.set_xlabel("Tiempo [s]")
 ax1.set_ylabel("Amplitud normalizada")
 ax1.legend(loc='upper right')
@@ -193,7 +227,7 @@ ax4.set_ylim([0, 102])
 # ── 7.5  Error de reconstrucción en el tiempo ─────────────────────────────
 error = x - x_rec
 ax5 = fig.add_subplot(gs[2, 1])
-ax5.plot(t[:muestra_fin], error[:muestra_fin], color='purple', linewidth=1.0)
+ax5.plot(t_seg, error[muestra_ini:muestra_fin], color='purple', linewidth=1.0)
 ax5.axhline(y=0, color='black', linewidth=0.8)
 ax5.set_title(
     f"Error de Reconstrucción  x[n] − x̂[n]\n"

@@ -4,9 +4,8 @@ from matplotlib.gridspec import GridSpec
 import sounddevice as sd
 import os
 
-# =============================================================================
+
 # 1. CAPTURA DE AUDIO (3 segundos desde el microfono)
-# =============================================================================
 fs       = 44100   # Frecuencia de muestreo estandar de audio [Hz]
 DURACION = 3       # Segundos a grabar
 
@@ -14,51 +13,37 @@ sep = "─" * 52
 print(sep)
 print("  COMPRESION ESPECTRAL ADAPTATIVA — FFT/IFFT")
 print(sep)
-print(f"  Preparate para grabar {DURACION} segundos de audio.")
-input("  Presiona ENTER cuando estes listo...")
-print("  Grabando... habla o genera un sonido ahora.")
+print(f"  Se graba una senal de audio de {DURACION} segundos.")
+input("  Presionar ENTER para iniciar la grabacion")
+print("  Captando senal")
 
 grabacion = sd.rec(int(DURACION * fs), samplerate=fs, channels=1, dtype='float64')
-sd.wait()   # Bloquear hasta que termine la grabacion
-
+sd.wait()
 print("  Grabacion completada.\n")
 
 # Convertir a array 1D
 audio_raw = grabacion.flatten()
 
-# Recortar a la mayor potencia de 2 <= total de muestras.
-# Esto es REQUERIDO por el algoritmo Cooley-Tukey de la FFT.
-# Ejemplo: 3s * 44100 Hz = 132300 muestras -> 2^17 = 131072 (aprox 2.97 s)
+# Recortar a la mayor potencia de 2 <= total de muestras. Para el uso del algoritmo de Cooley-Tukey
 N = 2 ** int(np.floor(np.log2(len(audio_raw))))
 x = audio_raw[:N]
 t = np.arange(N) / fs   # Vector de tiempo [s]
 
 print(f"  Muestras grabadas:          {len(audio_raw)}")
 print(f"  Muestras usadas (2^k):      {N}  (2^{int(np.log2(N))})")
-print(f"  Duracion efectiva:          {N / fs:.3f} s")
 
-# =============================================================================
-# 1b. PRE-PROCESAMIENTO
-# =============================================================================
-# Paso 1 — Remover offset DC: el microfono introduce un bias constante que
-# aparece como X[0] con energia enorme. Sin esto el algoritmo desperdicia el
-# presupuesto del 95% en ese componente inutil.
+
+#PRE-PROCESAMIENTO, eliminar offset DC y normalizar a [-1, 1]
+
 x = x - np.mean(x)
-
-# Paso 2 — Normalizar a [-1, 1]: garantiza que la señal ocupe el rango
-# completo independientemente del volumen de grabacion. Sin esto, una voz
-# grabada suavemente tiene energia muy pequena y los componentes seleccionados
-# producen una reconstruccion que visualmente parece "amplificada" porque sus
-# fases se suman constructivamente en ciertas regiones del bloque.
 pico = np.max(np.abs(x))
 if pico > 0:
     x = x / pico
 
-# =============================================================================
+
 # 2. CALCULO DE LA FFT
-# =============================================================================
 # X[k] = sum_{n=0}^{N-1} x[n] * e^{-j*2*pi*k*n/N}
-# numpy usa el algoritmo Cooley-Tukey, complejidad O(N log N)
+# algoritmo Cooley-Tukey fft de numpy
 X     = np.fft.fft(x)
 freqs = np.fft.fftfreq(N, d=1.0 / fs)   # Eje de frecuencias [Hz]
 
@@ -67,15 +52,14 @@ freqs = np.fft.fftfreq(N, d=1.0 / fs)   # Eje de frecuencias [Hz]
 energia_espectral = (np.abs(X) ** 2) / N
 energia_total     = np.sum(energia_espectral)
 
-# =============================================================================
+
 # 3. COMPRESION ESPECTRAL ADAPTATIVA — umbral del 95%
-# =============================================================================
 UMBRAL = 0.95   # Fraccion minima de energia a conservar
 
-# Paso 1: ordenar coeficientes de mayor a menor energia
+# 1: ordenar coeficientes de mayor a menor energia
 indices_orden = np.argsort(energia_espectral)[::-1]
 
-# Paso 2: acumular los coeficientes mas energeticos hasta superar el umbral
+# 2: acumular los coeficientes mas energeticos hasta superar el umbral
 energia_acum      = 0.0
 indices_retenidos = []
 
@@ -88,19 +72,17 @@ for idx in indices_orden:
 k                = len(indices_retenidos)
 razon_compresion = (1 - k / N) * 100
 
-# Paso 3: espectro comprimido — cero en las componentes no seleccionadas
+# 3: espectro comprimido con ceros en las componentes eliminadas
 X_comp                    = np.zeros(N, dtype=complex)
 X_comp[indices_retenidos] = X[indices_retenidos]
 
-# =============================================================================
+
 # 4. RECONSTRUCCION CON IFFT
-# =============================================================================
 # x_rec[n] = (1/N) * sum_k X_comp[k] * e^{j*2*pi*k*n/N}
 x_rec = np.fft.ifft(X_comp).real
 
-# =============================================================================
+
 # 5. METRICAS DE CALIDAD
-# =============================================================================
 MSE                    = np.mean((x - x_rec) ** 2)
 energia_preservada_pct = (energia_acum / energia_total) * 100
 SNR_dB                 = 10 * np.log10(np.mean(x ** 2) / MSE)
@@ -117,11 +99,8 @@ print(f"  MSE:                            {MSE:.8f}")
 print(f"  SNR (senal/error):              {SNR_dB:.2f} dB")
 print(sep)
 
-# =============================================================================
+
 # 6. REPRODUCCION DE AUDIO
-# =============================================================================
-# Normalizar a [-1, 1] para evitar clipping en el parlante.
-# La normalizacion NO altera las metricas (ya calculadas arriba).
 def normalizar(senal):
     maximo = np.max(np.abs(senal))
     return senal / maximo if maximo > 0 else senal
@@ -130,32 +109,27 @@ x_norm     = normalizar(x)
 x_rec_norm = normalizar(x_rec)
 
 print("\n  ── Reproduccion de audio ──────────────────")
-input("  Presiona ENTER para escuchar la señal ORIGINAL...")
+input("  Presionar ENTER para escuchar la señal ORIGINAL")
 sd.play(x_norm, samplerate=fs)
 sd.wait()
 
-input("  Presiona ENTER para escuchar la señal RECONSTRUIDA (comprimida)...")
+input("  Presionar ENTER para escuchar la señal RECONSTRUIDA")
 sd.play(x_rec_norm, samplerate=fs)
 sd.wait()
 
 print("  Reproduccion finalizada.")
 print(sep)
 
-# =============================================================================
-# 7. VISUALIZACION — 5 graficas
-# =============================================================================
+
+# 7. VISUALIZACION — graficas
 fig = plt.figure(figsize=(16, 13))
 fig.suptitle(
-    "Compresion Espectral Adaptativa — FFT / IFFT  (señal de micrófono)\n"
-    "CE 1110 | TEC — Análisis de Señales Mixtas",
+    "Compresion Espectral Adaptativa — FFT / IFFT  (señal de micrófono)\n",
     fontsize=13, fontweight='bold', y=0.98
 )
 gs = GridSpec(3, 2, figure=fig, hspace=0.52, wspace=0.38)
 
-# Buscar la ventana de 50 ms con mayor energia RMS en la señal original.
-# Los primeros 50 ms suelen ser silencio (antes de que el usuario hable),
-# lo que hace que la comparacion visual sea engañosa. Mostrar el segmento
-# mas activo da una comparacion honesta entre original y reconstruida.
+# Se muestra la parte de la señal con mayor energía RMS para apreciar mejor las diferencias entre original y reconstruida.
 win_muestras = int(1.0 * fs)   # 1 s
 hop          = win_muestras // 4
 mejor_inicio = 0
@@ -186,7 +160,6 @@ ax1.legend(loc='upper right')
 ax1.grid(True, alpha=0.3)
 
 # ── 7.2  Espectro de magnitud — original ─────────────────────────────────
-# Para audio usamos plot() en vez de stem() porque hay miles de frecuencias
 N2        = N // 2
 freqs_pos = freqs[:N2]
 mag_orig  = (2 / N) * np.abs(X[:N2])

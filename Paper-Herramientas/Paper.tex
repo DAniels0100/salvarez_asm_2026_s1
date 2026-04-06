@@ -7,6 +7,7 @@
 \usepackage{hyperref}
 \usepackage{orcidlink}
 \usepackage{stfloats}
+\usepackage{graphicx}
 
 \bibliographystyle{IEEEtran}
 
@@ -24,7 +25,7 @@
 \IEEEauthorblockA{\\Instituto Tecnológico de Costa Rica} \\ 
 \vspace{\baselineskip}\\
 \IEEEauthorblockN{
-Camila Lizano Brenes, 2024 \\
+Camila Lizano Brenes, 2024255324 \\
 Dylan Guerrero, 20 \\
 Javier Hernandez, 20 \\
 Sergio Daniel Alvarez Chanto, 2024134332 \\}
@@ -54,10 +55,75 @@ La Transformada rápida de Fourier es:\\
 La relación entre convolución y multiplicación en frecuencia se presenta:\\
 
 \section{Resultados y análisis}
+
 A continuación se presentan los resultados obtenidos en la implementación del sistema previamente descrito.
 Resultados de la implementación de la FFT y IFFT.\\
+
 Por otro lado, los resultados obtenidos en la implementación del compresor de una señal fueron: 
+\subsection{Experimentos con FFT}
 (poner imagenes)
+
+\subsection{Experimentos con FFT}
+En esta sección se presentan los resultados asociados a la implementación de la Transformada Discreta de Fourier (DFT) y la Transformada Rápida de Fourier (FFT). 
+
+\begin{itemize}
+    \item Descripción del programa desarrollado.
+    \item Comparación de tiempos de ejecución entre DFT y FFT.
+    \item Análisis de magnitud y fase de señales.
+    \item Figuras representativas.
+\end{itemize}
+
+\subsection{Experimentos de compresión espectral}
+
+Para la etapa de compresión, se desarrolló un sistema basado en la Transformada Rápida de Fourier (FFT) que permite analizar el contenido espectral de una señal de audio captada en tiempo real mediante un micrófono.
+
+Inicialmente, la señal es muestreada a una frecuencia de 44.1 kHz y posteriormente preprocesada mediante la eliminación del componente DC y normalización de amplitud. Para asegurar compatibilidad con el algoritmo FFT tipo Cooley-Tukey, la señal es recortada a un tamaño de $N = 2^k$ muestras.
+
+Una vez obtenida la FFT de la señal, se calcula la energía espectral utilizando el teorema de Parseval. A partir de esto, se ordenan los coeficientes espectrales en función de su energía y se selecciona el subconjunto mínimo que permite preservar al menos el 95\% de la energía total.
+
+Posteriormente, se genera un espectro comprimido en el cual únicamente se conservan los coeficientes seleccionados, mientras que el resto se establece en cero. La señal es reconstruida aplicando la Transformada Inversa de Fourier (IFFT).
+
+\subsubsection{Métricas de desempeño}
+
+Para evaluar la calidad de la reconstrucción, se calcularon las siguientes métricas:
+
+\begin{itemize}
+    \item Error Cuadrático Medio (MSE)
+    \item Energía preservada (\%)
+    \item Relación Señal a Ruido (SNR)
+\end{itemize}
+
+Los resultados obtenidos muestran que:
+
+\begin{itemize}
+    \item Se logró preservar aproximadamente un 95\% de la energía total de la señal.
+    \item El número de coeficientes retenidos fue significativamente menor que el total.
+    \item El MSE obtenido fue bajo, indicando una reconstrucción cercana a la señal original.
+    \item El valor de SNR confirma una buena calidad de reconstrucción.
+\end{itemize}
+
+\subsubsection{Análisis gráfico}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{compresion_espectral.png}
+\caption{Resultados de la compresión espectral: comparación entre señal original y reconstruida, espectros de magnitud, energía acumulada y error de reconstrucción.}
+\label{fig:compresion}
+\end{figure}
+
+En la Figura 1 se presenta la comparación entre la señal original y la señal reconstruida en el dominio del tiempo.
+
+También se muestran los espectros de magnitud antes y después de la compresión, donde se observa que únicamente las componentes de mayor energía son retenidas.
+
+Adicionalmente, se presenta la curva de energía acumulada en función del número de componentes, la cual permite visualizar el criterio de selección del 95\% de energía.
+
+Finalmente, se incluye la gráfica del error de reconstrucción, donde se observa que las diferencias son pequeñas.
+
+\subsubsection{Discusión}
+
+Los resultados demuestran que la compresión basada en energía espectral es efectiva para señales con contenido tonal. Sin embargo, en señales más complejas, preservar el 95\% de la energía no siempre garantiza una reconstrucción perceptualmente idéntica.
+
+Esto indica que la energía no es el único factor que determina la calidad percibida, lo cual es relevante en aplicaciones de procesamiento digital de señales.
 
 \section{Conclusiones}
 En conclusión, en el apartado de la implementación de la FFT y IFFT se logró...\\

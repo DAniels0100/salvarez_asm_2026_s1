@@ -1,5 +1,4 @@
 \documentclass[12pt, journal]{IEEEtran}
-\usepackage{lipsum}
 \usepackage{cite}
 \usepackage{amsmath}
 \usepackage{algorithmic}
@@ -10,7 +9,6 @@
 \usepackage{graphicx}
 \usepackage{float}
 
-
 \bibliographystyle{IEEEtran}
 
 \usepackage[caption=false,font=footnotesize]{subfig}
@@ -19,16 +17,15 @@
 
 \markboth{Análisis de Señales Mixtas, IS 2026}{}
 
-\title{Análisis de Señales Mixtas \\ \textit{Diseño de un sistema de compresión espectral adaptativa en tiempo real} }
-
+\title{Análisis de Señales Mixtas \\ \textit{Diseño de un sistema de compresión espectral adaptativa en tiempo real}}
 
 \author{
 \IEEEauthorblockA{\\Escuela de Ingeniería en Computadores}
-\IEEEauthorblockA{\\Instituto Tecnológico de Costa Rica} \\ 
+\IEEEauthorblockA{\\Instituto Tecnológico de Costa Rica} \\
 \vspace{\baselineskip}\\
 \IEEEauthorblockN{
 Camila Lizano Brenes, 2024255324 \\
-Dylan Guerrero , 2022016016 \\
+Dylan Guerrero Gonzalez, 2022016016 \\
 Javier Hernandez Castillo, 2022321746 \\
 Sergio Daniel Alvarez Chanto, 2024134332}
 }
@@ -36,110 +33,80 @@ Sergio Daniel Alvarez Chanto, 2024134332}
 \maketitle
 
 \begin{abstract}
-This paper presents the design and partial implementation of a real-time adaptive spectral compression system based on the Fast Fourier Transform (FFT). The work reported corresponds to the experimental stages of the project, specifically the implementation and analysis of the Discrete Fourier Transform (DFT) and FFT, as well as adaptive spectral compression and reconstruction using the Inverse FFT (IFFT) in a computational environment.
-
-The compression strategy leverages Parseval's theorem to identify the minimum number of spectral components required to preserve at least 95\% of the total signal energy. Experimental results demonstrate that while high energy preservation is achieved with a reduced number of coefficients, this criterion does not necessarily guarantee perceptual fidelity, especially for broadband signals such as speech.
+This paper presents the design and partial implementation of a real-time adaptive spectral compression system based on the Fast Fourier Transform (FFT). The work covers the experimental stages of the project: implementation and analysis of the Discrete Fourier Transform (DFT) and FFT algorithms in a computational environment, as well as adaptive spectral compression and reconstruction using the Inverse FFT (IFFT). The compression strategy leverages Parseval's theorem to identify the minimum number of spectral components required to preserve at least 95\% of total signal energy. Experimental results demonstrate that while high energy preservation is achieved with a significantly reduced number of coefficients, this criterion does not necessarily guarantee perceptual fidelity, especially for broadband signals such as speech, where low-energy components carry relevant intelligibility information.
 \end{abstract}
- 
+
 \begin{IEEEkeywords}
 Compresor, energía, transformada de Fourier, series de Fourier.
 \end{IEEEkeywords}
 
 \section{Introduction}
-En este proyecto se busca diseñar un sistema de compresión espectral adaptativo en tiempo real. Para lograr esto, se debe generar una compresión y reconstrucción espectral en tiempo real utilizando la Transformada Rápida de Fourier (FFT) y la Transformada Inversa Rápida de Fourier (IFFT), respectivamente. El sistema completo cuenta con tres microcontroladores, cada uno con una funcionalidad independiente. El primero funciona como un transmisor, este es el encargado de captar una señal analógica (tono seno o señal compuesta) con un dispositivo ADC, calcular la FFT y realizar la compresion espectral adaptativa, la cual conserva solamente las componentes de mayor energía. El segundo y el tercer microcontrolador son receptores de la señal comprimida que transmite el primer microcontrolador. El segundo, al recibir la señal, realiza la reconstrucción en el dominio del tiempo aplicando la IFFT y estando conectado a un parlante DAC la reproduce, para verificar la similitud con la original. Finalmente, el tercer microcontrolador se encarga de reconstruir la señal, con el objetivo de calcular métricas cuántitativas como el Error Cuadrático Medio, la energía preservada y el error de la señal.\\
-Debido a la naturaleza matemática del problema, el desarrollo del proyecto inicia con una etapa investigativa, donde se analizan, comprenden y, finalmente, se aplican los conceptos en la implementación del sistema. Este proceso se refleja en la estructura del presente documento. Primero se presenta el marco teórico utilizado, incluyendo la literatura consultada y la explicación de los conceptos fundamentales. A continuación, se exponen los resultados y análisis obtenidos. Posteriormente, se presentan las conclusiones del desarrollo. Finalmente, se discuten posibles mejoras.
+
+El objetivo de este proyecto es diseñar e implementar un sistema de compresión y reconstrucción espectral adaptativo en tiempo real, utilizando la Transformada Rápida de Fourier (FFT) y la Transformada Inversa Rápida de Fourier (IFFT). El sistema completo opera sobre tres microcontroladores con funciones diferenciadas. El primero actúa como transmisor: captura una señal analógica mediante un ADC, calcula su FFT y aplica compresión espectral adaptativa conservando únicamente las componentes de mayor energía, para luego transmitir los coeficientes seleccionados. El segundo microcontrolador (Receptor 1) reconstruye la señal en el dominio del tiempo aplicando la IFFT y la reproduce mediante DAC o PWM filtrado, permitiendo verificar auditivamente la similitud con la original. El tercer microcontrolador (Receptor 2) también reconstruye la señal, pero con el propósito de calcular métricas cuantitativas de calidad: Error Cuadrático Medio (MSE), energía preservada y relación señal a error (SNR), mostrando los resultados en una pantalla LCD.
+
+Debido a la naturaleza matemática del problema, el desarrollo inicia con una etapa experimental en computador, donde se implementan y analizan los algoritmos antes de llevarlos al hardware. Este proceso se refleja en la estructura del presente documento: primero se expone el marco teórico con los conceptos fundamentales, luego los resultados y análisis de los experimentos realizados, seguido de las conclusiones y finalmente las mejoras propuestas.
 
 \section{Marco teórico}
 
-Las series de Fourier permiten expresar una señal como una suma de exponenciales complejas, lo cual facilita su análisis en el dominio de la frecuencia \cite{tello2016introduccion}. Esta representación es de gran utilidad en el procesamiento digital de señales, particularmente en aplicaciones como la compresión espectral, donde es necesario identificar y conservar las componentes de mayor energía.
+Las series de Fourier permiten expresar cualquier señal periódica como una suma de exponenciales complejas, lo que facilita su análisis en el dominio de la frecuencia \cite{tello2016introduccion}. Esta representación resulta de gran utilidad en el procesamiento digital de señales, especialmente en aplicaciones de compresión espectral donde es necesario identificar y conservar las componentes de mayor energía.
 
-Esto es posible gracias a la propiedad de ortogonalidad, la cual establece que las funciones base (en este caso seno y coseno) de diferentes frecuencias son linealmente independientes entre sí. Como consecuencia, el producto interno entre funciones de distinta frecuencia es nulo, lo que permite separar y analizar cada componente espectral sin interferencia \cite{Oppenheim_Willsky_Nawab_1997}.
+Esto es posible gracias a la propiedad de ortogonalidad, que establece que las funciones base de distintas frecuencias son linealmente independientes entre sí. Como consecuencia, el producto interno entre funciones de distinta frecuencia es nulo, lo que permite separar y analizar cada componente espectral de forma independiente, sin interferencia entre ellas \cite{Oppenheim_Willsky_Nawab_1997}.
 
-En el caso de señales discretas y de longitud finita, la Transformada Discreta de Fourier (DFT) permite obtener una representación en el dominio de la frecuencia a partir de muestras igualmente espaciadas del espectro. Matemáticamente, la DFT transforma una secuencia temporal $x(n)$ en un conjunto de coeficientes $X(k)$ definidos como:
-
+Para señales discretas de longitud finita, la Transformada Discreta de Fourier (DFT) obtiene la representación frecuencial a partir de muestras igualmente espaciadas. Matemáticamente, la DFT transforma la secuencia temporal $x(n)$ en un conjunto de coeficientes complejos $X(k)$ definidos como:
 \begin{equation}
 X(k) = \sum_{n=0}^{N-1} x(n)e^{-j2\pi kn/N}, \quad k = 0,1,\dots,N-1
 \end{equation}
-
-mientras que la transformada inversa permite reconstruir la señal original mediante:
-
+y la transformada inversa (IDFT) permite reconstruir la señal original a partir de dichos coeficientes:
 \begin{equation}
 x(n) = \frac{1}{N} \sum_{k=0}^{N-1} X(k)e^{j2\pi kn/N}
 \end{equation}
+Esta representación caracteriza completamente la señal en el dominio frecuencial, permitiendo identificar cómo se distribuye su energía en cada componente \cite{proakis2007digital}.
 
-Esta representación es fundamental en el análisis espectral, ya que permite caracterizar completamente la señal en términos de sus componentes en frecuencia \cite{proakis2007digital}. Además, la DFT permite identificar cómo se distribuye la energía de la señal en el dominio frecuencial, lo cual resulta clave en aplicaciones de compresión.
-
-Desde el punto de vista energético, la DFT cumple con el teorema de Parseval, el cual establece que la energía total de la señal en el dominio del tiempo es equivalente a la energía en el dominio de la frecuencia:
-
+Desde el punto de vista energético, la DFT cumple con el teorema de Parseval, que establece la equivalencia entre la energía en el dominio del tiempo y en el dominio de la frecuencia:
 \begin{equation}
 \sum_{n=0}^{N-1} |x(n)|^2 = \frac{1}{N} \sum_{k=0}^{N-1} |X(k)|^2
 \end{equation}
+Esta propiedad es fundamental para la compresión espectral, ya que permite cuantificar la contribución energética de cada coeficiente y seleccionar el subconjunto mínimo que concentre la mayor parte de la energía total de la señal \cite{proakis2007digital}.
 
-Esta propiedad permite cuantificar la contribución de cada componente espectral y seleccionar aquellas que concentran la mayor parte de la energía, lo cual constituye la base de los métodos de compresión espectral \cite{proakis2007digital}.
-
-Por otro lado, la Transformada Rápida de Fourier (FFT) corresponde a un conjunto de algoritmos que permiten calcular la DFT de manera eficiente, reduciendo su complejidad computacional de $O(N^2)$ a $O(N \log N)$ \cite{rj2003fourier}. Esta mejora hace posible el análisis espectral en aplicaciones en tiempo real. En el contexto de este proyecto, la FFT facilita la identificación y selección de las componentes de mayor energía de una señal, permitiendo su compresión y posterior reconstrucción mediante la transformada inversa.
-
+La Transformada Rápida de Fourier (FFT) es un conjunto de algoritmos que calculan la DFT de forma eficiente, reduciendo su complejidad computacional de $O(N^2)$ a $O(N \log N)$ \cite{rj2003fourier}. Esta reducción hace viable el análisis espectral en aplicaciones en tiempo real. En el contexto del proyecto, la FFT permite identificar y seleccionar las componentes de mayor energía de manera eficiente, habilitando la compresión y reconstrucción espectral en tiempo real sobre hardware embebido.
 
 \section{Resultados y análisis}
 
-En esta sección se presentan los resultados obtenidos en la implementación de la FFT, la IFFT y el sistema de compresión espectral adaptativa.
-
-
+En esta sección se presentan los resultados de los experimentos realizados en Python para la implementación de la DFT, la FFT y el sistema de compresión espectral adaptativa.
 
 \subsection{Experimentos con FFT}
 
-En esta sección se presentan los resultados asociados a la implementación de la Transformada Discreta de Fourier (DFT) y la Transformada Rápida de Fourier (FFT) en Python. El objetivo de esta etapa fue comparar ambas técnicas desde el punto de vista computacional y verificar que ambas permiten obtener la misma representación espectral de una señal, pero con costos de ejecución muy distintos.
-
-Para realizar los experimentos, se generaron señales discretas de prueba en el dominio del tiempo, principalmente tonos senoidales y señales compuestas por varias componentes de frecuencia. A cada señal se le calculó su espectro mediante dos procedimientos: primero, una implementación directa de la DFT a partir de su ecuación matemática, y segundo, una implementación basada en FFT. Posteriormente, se compararon los tiempos de ejecución para distintos tamaños de señal y se analizaron los resultados obtenidos en términos de magnitud y fase.
-
-A partir de estos experimentos se comprobó que la DFT y la FFT producen resultados espectrales equivalentes, ya que ambas describen la misma distribución de frecuencias presente en la señal. Sin embargo, la FFT reduce significativamente el tiempo de cómputo, lo cual la hace más adecuada para aplicaciones de procesamiento digital de señales y, en particular, para un sistema de compresión espectral en tiempo real como el propuesto en este proyecto.
-
-En la prueba realizada, ambos métodos produjeron espectros equivalentes, pero la FFT requirió un tiempo de ejecución considerablemente menor que la DFT. Esto confirma experimentalmente que, aunque ambas transformadas describen la misma información espectral, la FFT es la opción adecuada cuando se requiere procesamiento eficiente.
-
-\subsubsection{Descripción del programa desarrollado}
-
-Para la realización de los experimentos, se desarrolló un programa en Python que permite analizar señales discretas en el dominio del tiempo y obtener su representación en el dominio de la frecuencia utilizando tanto la Transformada Discreta de Fourier (DFT) como la Transformada Rápida de Fourier (FFT).
-
-El programa genera señales de prueba, incluyendo tonos senoidales y señales compuestas por múltiples frecuencias. Posteriormente, calcula el espectro de cada señal mediante una implementación directa de la DFT basada en su definición matemática, y mediante la función optimizada FFT disponible en la biblioteca NumPy.
-
-Además, se incorporaron mediciones de tiempo de ejecución para ambas implementaciones, con el fin de comparar su eficiencia computacional para distintos tamaños de señal. Finalmente, el programa permite visualizar la magnitud y la fase de los espectros obtenidos, facilitando el análisis de los resultados.
-
+El objetivo de esta etapa fue comparar la DFT y la FFT desde el punto de vista computacional y verificar la equivalencia de sus representaciones espectrales. Se generaron señales discretas de prueba —tonos senoidales y señales multicomponente— y se calculó el espectro de cada una con ambos métodos, midiendo los tiempos de ejecución para distintos tamaños de señal $N$.
 
 \subsubsection{Implementación de la DFT}
 
-La Transformada Discreta de Fourier (DFT) fue implementada directamente a partir de su definición matemática, utilizando sumatorias complejas para cada coeficiente espectral. Esta implementación permite analizar detalladamente el proceso de transformación desde el dominio del tiempo hacia el dominio de la frecuencia.
-
-Para validar la implementación, se utilizó una señal multicomponente formada por la suma de varias senoidales de diferentes frecuencias. A partir de esta señal, se obtuvo su espectro de magnitud, permitiendo identificar claramente las componentes dominantes en frecuencia presentes.
+La DFT fue implementada directamente a partir de su definición matemática, utilizando sumatorias complejas para cada coeficiente espectral. Esta implementación permite analizar detalladamente el proceso de transformación desde el dominio del tiempo hacia el dominio de la frecuencia. Para validarla, se utilizó una señal multicomponente formada por la suma de varias senoidales de distintas frecuencias, obteniendo su espectro de magnitud.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.48\textwidth]{dft_resultado.png}
-\caption{Señal de prueba en el dominio del tiempo y espectro de magnitud obtenido mediante la DFT.}
+\caption{Señal de prueba en el dominio del tiempo y espectro de magnitud obtenido mediante DFT.}
 \label{fig:dft}
 \end{figure}
 
-En la Figura \ref{fig:dft} se observan picos claramente definidos en las frecuencias correspondientes a las componentes de la señal, lo cual valida el correcto funcionamiento de la implementación de la DFT.
+En la Figura~\ref{fig:dft} se observan picos claramente definidos en las frecuencias correspondientes a las componentes de la señal de prueba, lo cual valida el correcto funcionamiento de la implementación de la DFT.
 
 \subsubsection{Implementación de la FFT}
 
-La Transformada Rápida de Fourier (FFT) fue implementada utilizando la función optimizada de la biblioteca NumPy, basada en el algoritmo de Cooley-Tukey. Esta implementación permite calcular el espectro de una señal de forma mucho más eficiente que la DFT directa.
-
-Se utilizó la misma señal de prueba que en la implementación de la DFT para garantizar una comparación justa entre ambos métodos.
+La FFT fue implementada utilizando la función optimizada de la biblioteca NumPy, basada en el algoritmo de Cooley-Tukey. Se utilizó la misma señal multicomponente que en la implementación de la DFT para garantizar una comparación directa y justa entre ambos métodos.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.48\textwidth]{fft_resultado.png}
-\caption{Espectro de magnitud obtenido mediante la FFT.}
+\caption{Espectro de magnitud obtenido mediante FFT para la misma señal de prueba.}
 \label{fig:fft}
 \end{figure}
 
-Como se observa en la Figura \ref{fig:fft}, la FFT produce un espectro prácticamente idéntico al obtenido mediante la DFT. Esto confirma que la FFT es una implementación eficiente de la DFT que preserva completamente la información espectral de la señal.
+Como se observa en la Figura~\ref{fig:fft}, la FFT produce un espectro prácticamente idéntico al obtenido con la DFT, confirmando que ambas transformadas describen la misma información espectral. La diferencia fundamental entre ambas radica exclusivamente en su eficiencia computacional.
 
 \subsubsection{Comparación de tiempos de ejecución}
 
-
-
-Se realizó una comparación del tiempo de ejecución entre la DFT implementada directamente y la FFT optimizada para distintos tamaños de señal. Para ello, se evaluaron múltiples valores de $N$, permitiendo analizar cómo varía el rendimiento de ambos métodos en función del número de muestras.
+Se realizó una comparación sistemática del tiempo de ejecución entre la DFT directa y la FFT optimizada para múltiples valores de $N$, permitiendo analizar cómo varía el rendimiento de cada método en función del tamaño de la señal.
 
 \begin{figure}[H]
 \centering
@@ -149,9 +116,9 @@ Se realizó una comparación del tiempo de ejecución entre la DFT implementada 
 \end{figure}
 
 \begin{table}[H]
-\label{tab:tiempos}
 \centering
 \caption{Comparación de tiempos de ejecución entre DFT y FFT}
+\label{tab:tiempos}
 \begin{tabular}{c|c|c|c}
 \hline
 N & DFT [s] & FFT [s] & Relación DFT/FFT \\
@@ -165,66 +132,32 @@ N & DFT [s] & FFT [s] & Relación DFT/FFT \\
 \end{tabular}
 \end{table}
 
-En la Figura \ref{fig:tiempos} se observa que la FFT presenta tiempos de ejecución considerablemente menores que la DFT para todos los tamaños evaluados. Además, la diferencia entre ambos métodos crece rápidamente conforme aumenta $N$. Este comportamiento se debe a que la DFT presenta una complejidad de $O(N^2)$, mientras que la FFT reduce esta a $O(N \log N)$, lo cual explica la creciente diferencia observada en los tiempos de ejecución conforme aumenta el tamaño de la señal.
-
-Como se observa en la Tabla~\ref{tab:tiempos}, el tiempo de ejecución de la DFT crece rápidamente conforme aumenta el tamaño de la señal, mientras que la FFT mantiene tiempos prácticamente constantes en el rango evaluado.
-
-La relación entre ambos métodos alcanza valores superiores a $10^{4}$ para $N = 1024$, lo cual evidencia experimentalmente la diferencia en complejidad computacional entre la DFT, de orden $\mathcal{O}(N^{2})$, y la FFT, de orden $\mathcal{O}(N \log N)$.
-
-Esto confirma que la FFT es indispensable para aplicaciones de procesamiento en tiempo real.
+Como se aprecia en la Tabla~\ref{tab:tiempos} y la Figura~\ref{fig:tiempos}, el tiempo de ejecución de la DFT crece rápidamente conforme aumenta $N$, mientras que la FFT mantiene tiempos prácticamente constantes en el rango evaluado. La relación entre ambos métodos supera $10^4$ para $N = 1024$, evidenciando experimentalmente la diferencia de complejidad: $O(N^2)$ para la DFT frente a $O(N \log N)$ para la FFT. Adicionalmente, esta diferencia de rendimiento no es constante sino que aumenta con el tamaño de señal, comportamiento consistente con el análisis teórico de complejidad. Este resultado es crítico para el sistema propuesto, ya que confirma que la FFT es indispensable para garantizar el procesamiento en tiempo real.
 
 \subsubsection{Análisis espectral: magnitud y fase}
 
-El análisis espectral de la señal permite observar tanto la magnitud como la fase de cada componente frecuencial, lo cual proporciona una representación completa de la señal en el dominio de la frecuencia.
+El análisis espectral completo requiere considerar tanto la magnitud como la fase de los coeficientes de Fourier, ya que ambas juntas proporcionan la representación completa de la señal en el dominio de la frecuencia.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.48\textwidth]{magnitud_fase.png}
-\caption{Magnitud y fase del espectro de la señal.}
+\caption{Magnitud y fase del espectro de la señal de prueba.}
 \label{fig:fase}
 \end{figure}
 
-En la Figura \ref{fig:fase}, la magnitud permite identificar las frecuencias dominantes de la señal, mientras que la fase describe el desplazamiento relativo de cada componente frecuencial, siendo esencial para una reconstrucción precisa de la señal en el dominio del tiempo.
-
-\subsubsection{Análisis de resultados}
-
-Los resultados obtenidos demuestran que tanto la DFT como la FFT producen representaciones espectrales equivalentes, lo cual confirma que ambas transformadas contienen la misma información en el dominio de la frecuencia.
-
-Sin embargo, la diferencia fundamental entre ambas radica en su eficiencia computacional. La DFT presenta un costo elevado debido a su implementación directa, lo cual limita su uso en aplicaciones prácticas. Por otro lado, la FFT reduce significativamente el tiempo de ejecución, permitiendo su uso en sistemas en tiempo real.
-
-Adicionalmente, los resultados experimentales evidencian que la diferencia de rendimiento entre ambos métodos no es constante, sino que aumenta con el tamaño de la señal, lo cual es consistente con el análisis teórico de complejidad.
-
-Este comportamiento es crítico para el desarrollo del sistema de compresión espectral adaptativa, ya que el procesamiento en tiempo real requiere algoritmos altamente eficientes. Por lo tanto, la FFT se establece como la herramienta adecuada para la implementación del sistema propuesto.
+En la Figura~\ref{fig:fase}, la magnitud permite identificar las frecuencias dominantes presentes en la señal. La fase, por su parte, describe el desplazamiento relativo de cada componente frecuencial respecto a un origen de referencia. Conservar correctamente la información de fase es igualmente esencial para la reconstrucción precisa de la señal en el dominio del tiempo, ya que errores en la fase alteran la forma de onda reconstruida independientemente de que la magnitud sea correcta.
 
 \subsection{Experimentos de compresión espectral}
 
-Para la etapa de compresión, se desarrolló un sistema basado en la Transformada Rápida de Fourier (FFT) que permite analizar el contenido espectral de una señal de audio captada en tiempo real mediante un micrófono.
+Para la etapa de compresión, se desarrolló un sistema en Python que captura audio en tiempo real mediante micrófono a una frecuencia de muestreo de 44.1~kHz. La señal es preprocesada eliminando la componente DC y normalizando la amplitud. Con el fin de garantizar compatibilidad con el algoritmo FFT tipo Cooley-Tukey, la señal es recortada a un tamaño $N = 2^k$, correspondiente a la mayor potencia de dos menor o igual al número total de muestras capturadas.
 
-La señal es muestreada a una frecuencia de 44.1 kHz y posteriormente preprocesada mediante la eliminación del componente DC y la normalización de amplitud. Con el fin de garantizar compatibilidad con el algoritmo FFT tipo Cooley-Tukey, la señal es recortada a un tamaño $N = 2^k$, correspondiente a la mayor potencia de dos menor o igual al número total de muestras capturadas.
+Una vez obtenida la FFT de la señal, se calcula la energía espectral de cada coeficiente mediante el teorema de Parseval. Los coeficientes son ordenados de mayor a menor energía y se seleccionan iterativamente hasta que la energía acumulada alcanza al menos el 95\% de la energía total de la señal. Este criterio adaptativo determina de forma automática el número mínimo de componentes necesarias para representar la señal con el nivel de fidelidad predefinido.
 
-Una vez obtenida la FFT de la señal, se calcula la energía espectral de cada coeficiente utilizando el teorema de Parseval, el cual establece que la energía total de la señal en el dominio del tiempo es equivalente a la energía total en el dominio de la frecuencia. A partir de esta representación, los coeficientes espectrales son ordenados de mayor a menor energía.
-
-El proceso de compresión consiste en seleccionar iterativamente los coeficientes de mayor energía hasta alcanzar al menos el 95\% de la energía total de la señal. Este criterio permite determinar de forma adaptativa el número mínimo de componentes necesarias para representar la señal con un nivel de energía preservada predefinido. El umbral del 95\% de energía se seleccionó como un compromiso entre compresión y fidelidad de la señal. Valores menores, como 90\%, permiten una mayor reducción en el número de coeficientes, pero introducen una degradación más evidente en la señal reconstruida. Por otro lado, valores más altos, como 99\%, mejoran la calidad de reconstrucción, pero reducen significativamente la eficiencia de compresión.
-
-Por lo tanto, el criterio del 95\% representa un punto intermedio que permite conservar la mayor parte de la energía de la señal mientras se logra una reducción considerable en la cantidad de información transmitida.
-
-Posteriormente, se construye un espectro comprimido en el cual únicamente se conservan los coeficientes seleccionados, mientras que el resto se anula. Finalmente, la señal es reconstruida en el dominio del tiempo mediante la aplicación de la Transformada Inversa de Fourier (IFFT), permitiendo comparar su similitud con la señal original.
+El umbral del 95\% fue seleccionado como un equilibrio entre compresión y calidad de reconstrucción. Valores menores —como 90\%— permiten mayor reducción en el número de coeficientes pero introducen una degradación más evidente en la señal reconstruida. Por el contrario, valores más altos —como 99\%— mejoran la calidad pero reducen significativamente la eficiencia de compresión. Finalmente, se construye un espectro comprimido en el que únicamente se conservan los coeficientes seleccionados —el resto se anula— y la señal se reconstruye en el dominio del tiempo mediante la IFFT.
 
 \subsubsection{Métricas de desempeño}
-Para evaluar la calidad de la reconstrucción, se calcularon las siguientes métricas:
-\begin{itemize}
-    \item Error Cuadrático Medio (MSE)
-    \item Energía preservada (\%)
-    \item Relación Señal a Ruido (SNR)
-\end{itemize}
-Los resultados obtenidos muestran que:
 
-\begin{itemize}
-    \item Se logró preservar aproximadamente un 95\% de la energía total de la señal.
-    \item El número de coeficientes retenidos fue significativamente menor que el total.
-    \item El MSE obtenido fue bajo, lo que indica que el error promedio entre la señal original y la reconstruida es reducido desde el punto de vista energético.
-    \item El valor de SNR refleja que, aunque la señal reconstruida conserva su estructura general, existe una degradación perceptual, especialmente en señales de voz.
-\end{itemize}
+Para evaluar la calidad de la reconstrucción se calcularon las siguientes métricas: Error Cuadrático Medio (MSE), energía preservada (\%) y Relación Señal a Ruido (SNR). Los resultados obtenidos muestran que se logró preservar aproximadamente el 95\% de la energía total con un número de coeficientes significativamente menor al total disponible. El MSE fue bajo, indicando que el error promedio entre la señal original y la reconstruida es reducido desde el punto de vista energético. El valor de SNR refleja que, aunque la señal reconstruida conserva su estructura general, existe una degradación perceptual moderada, especialmente pronunciada en señales de voz, donde componentes de baja energía contienen información relevante para la inteligibilidad.
 
 \subsubsection{Análisis gráfico}
 
@@ -235,41 +168,23 @@ Los resultados obtenidos muestran que:
 \label{fig:compresion}
 \end{figure}
 
-En la Figura \ref{fig:compresion} se presenta la comparación entre la señal original y la señal reconstruida en el dominio del tiempo. Se observa que la señal reconstruida conserva la estructura general de la señal original, pero presenta pérdida de detalle en regiones donde la señal contiene transiciones o variaciones de mayor complejidad.
+En la Figura~\ref{fig:compresion} se presenta la comparación entre la señal original y la señal reconstruida en el dominio del tiempo. Se observa que la señal reconstruida conserva la estructura general, pero presenta pérdida de detalle en regiones de mayor variabilidad o transiciones complejas. Los espectros de magnitud antes y después de la compresión muestran claramente que únicamente se conservan las componentes de mayor energía, mientras que el resto es eliminado. La curva de energía acumulada ilustra el criterio de selección utilizado para alcanzar el umbral del 95\%, y la gráfica del error de reconstrucción confirma que las diferencias entre señal original y reconstruida no están distribuidas uniformemente, sino que se concentran principalmente en los segmentos de mayor variabilidad de la señal.
 
-También se muestran los espectros de magnitud antes y después de la compresión, donde se aprecia que únicamente se conservan las componentes de mayor energía. La curva de energía acumulada permite visualizar el criterio de selección utilizado para alcanzar el umbral del 95\% de energía preservada.
-
-Finalmente, la gráfica del error de reconstrucción muestra que las diferencias no están distribuidas uniformemente, sino que se concentran principalmente en los segmentos de mayor energía de la señal. Esto indica que, aunque la compresión es efectiva desde el punto de vista energético, no necesariamente conserva todos los detalles relevantes desde el punto de vista perceptual.
-
-\subsubsection{Discusión}
-
-Los resultados demuestran que la compresión basada en energía espectral permite reducir significativamente el número de coeficientes necesarios para representar la señal, manteniendo al mismo tiempo una alta proporción de la energía total. Sin embargo, este criterio presenta limitaciones importantes cuando se analiza desde el punto de vista perceptual.
-
-En señales de tipo tonal, donde la energía se concentra en pocas frecuencias, el método resulta altamente eficiente, logrando una reconstrucción prácticamente indistinguible de la señal original. No obstante, en señales de voz o señales de banda ancha, la energía se distribuye en un mayor número de componentes espectrales, incluyendo componentes de baja energía que contienen información relevante para la inteligibilidad.
-
-Como resultado, aunque se preserve el 95\% de la energía total, la eliminación de componentes de baja energía puede generar pérdida de detalle, afectando la calidad percibida de la señal reconstruida. Esto se refleja en el valor del SNR y en la presencia de error localizado en regiones de alta variabilidad de la señal.
-
-Estos resultados evidencian que la energía espectral, si bien es un criterio adecuado para compresión, no es suficiente por sí sola para garantizar fidelidad perceptual. En aplicaciones reales, sería necesario complementar este enfoque con modelos perceptuales o técnicas de ponderación espectral.
+En señales de tipo tonal, donde la energía se concentra en pocas frecuencias, el método resulta altamente eficiente y logra una reconstrucción prácticamente indistinguible de la original. Sin embargo, en señales de voz o banda ancha, la energía se distribuye en un mayor número de componentes espectrales, incluyendo componentes de baja energía que contienen información relevante para la inteligibilidad. La eliminación de estas componentes puede generar pérdida de detalle perceptual, afectando la calidad percibida de la señal reconstruida a pesar de haber preservado el 95\% de la energía total. Esto evidencia que la energía espectral, si bien es un criterio adecuado y eficiente para la compresión, no es suficiente por sí sola para garantizar fidelidad perceptual en aplicaciones de audio general. En aplicaciones reales, sería necesario complementar este enfoque con modelos perceptuales o técnicas de ponderación espectral.
 
 \section{Conclusiones}
 
-En este trabajo se logró implementar y analizar la Transformada Discreta de Fourier (DFT) y la Transformada Rápida de Fourier (FFT), comprobando experimentalmente que ambas permiten obtener la misma representación espectral de una señal. Sin embargo, se evidenció que la FFT presenta una mejora significativa en el tiempo de ejecución, lo que la convierte en la opción adecuada para aplicaciones de procesamiento en tiempo real.
+En este trabajo se implementaron y compararon la DFT y la FFT, comprobando experimentalmente que ambas producen representaciones espectrales equivalentes. Sin embargo, la diferencia de rendimiento entre ambas no es constante, sino que crece con el tamaño de la señal, lo cual es consistente con sus respectivas complejidades computacionales ($O(N^2)$ para la DFT y $O(N \log N)$ para la FFT). Este comportamiento confirma que la FFT es la herramienta adecuada para el procesamiento en tiempo real requerido por el sistema propuesto.
 
-Adicionalmente, se desarrolló un sistema de compresión espectral adaptativa basado en la conservación del 95\% de la energía total de la señal. Los resultados demostraron que es posible reducir considerablemente el número de coeficientes necesarios para representar la señal, manteniendo su estructura general.
+Se desarrolló un sistema de compresión espectral adaptativa basado en la conservación del 95\% de la energía total, logrando reducir considerablemente el número de coeficientes necesarios para representar la señal. Los resultados demuestran que el criterio energético es eficiente para señales tonales, pero presenta limitaciones en señales de voz o banda ancha, donde la preservación de energía no garantiza una reconstrucción perceptualmente fiel. Esto indica que la calidad percibida depende no solo de la energía conservada, sino también de la distribución espectral de la señal y de la relevancia perceptual de cada componente.
 
-No obstante, se observó que en señales complejas como la voz, la preservación de la energía no garantiza una reconstrucción perceptualmente idéntica. Esto indica que la calidad percibida depende no solo de la energía, sino también de la distribución espectral de la señal.
-
-Adicionalmente, los resultados obtenidos en esta etapa experimental validan la viabilidad del enfoque propuesto para su implementación en el sistema completo de compresión espectral en tiempo real. En particular, la eficiencia computacional de la FFT y la efectividad del criterio de selección por energía constituyen elementos fundamentales para su futura implementación en microcontroladores.
-
-En general, el trabajo permitió validar la utilidad de la FFT como herramienta fundamental en el procesamiento digital de señales y evidenciar las limitaciones del criterio de energía en aplicaciones de compresión.
-
+En general, los resultados obtenidos en esta etapa experimental validan la viabilidad del enfoque para su futura implementación en el sistema completo sobre microcontroladores, donde la eficiencia computacional de la FFT y la efectividad del criterio de selección por energía constituyen elementos fundamentales del diseño.
 
 \section{Mejoras}
 
-Como trabajo futuro, se podrían explorar métodos de compresión más avanzados que consideren no solo la energía espectral, sino también criterios perceptuales basados en la audición humana. Asimismo, se podrían implementar técnicas de cuantización de coeficientes o codificación más eficiente para reducir aún más el ancho de banda requerido.
+Como trabajo futuro, se podrían explorar métodos de compresión más avanzados que consideren no solo la energía espectral, sino también criterios perceptuales basados en modelos de la audición humana, como el enmascaramiento frecuencial. Asimismo, se podrían implementar técnicas de cuantización de coeficientes o esquemas de codificación más eficientes para reducir aún más el ancho de banda requerido en la transmisión entre microcontroladores.
 
-Otra mejora importante sería la implementación del sistema completo en microcontroladores, evaluando el desempeño en condiciones reales de operación y optimizando el uso de memoria y procesamiento. Finalmente, se podría analizar el efecto de diferentes umbrales de energía sobre la calidad de la reconstrucción para determinar un balance óptimo entre compresión y fidelidad.
-
+Otra mejora importante sería analizar el efecto de distintos umbrales de energía sobre la calidad de reconstrucción para distintos tipos de señal, determinando un balance óptimo según cada aplicación. Finalmente, la implementación del sistema completo en microcontroladores permitiría evaluar el desempeño en condiciones reales de operación, considerando las restricciones de memoria y capacidad de procesamiento del hardware seleccionado.
 
 \bibliography{references}
 

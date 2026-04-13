@@ -1,267 +1,308 @@
+import cmath
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import sounddevice as sd
 import os
 
+# ============================================================
+# FFT, IFFT y funciones espectrales
+# ============================================================
+
+def fft(x):
+    """
+    Transformada Rapida de Fourier — Cooley-Tukey radix-2 recursivo.
+    Descompone la DFT de N puntos en dos DFTs de N/2:
+        X[k] = FFT(par)[k]  +  W_N^k · FFT(impar)[k]
+    donde W_N^k = e^{-j2πk/N} es el factor de giro.
+    Complejidad O(N log N) frente a O(N²) de la DFT directa.
+    """
+    N = len(x)
+    if N == 1:
+        return [complex(x[0])]     # caso base: DFT de 1 punto = la muestra misma
+    par   = fft(x[::2])            # DFT de muestras en posicion par  (0, 2, 4, ...)
+    impar = fft(x[1::2])           # DFT de muestras en posicion impar (1, 3, 5, ...)
+    W = [cmath.exp(-2j * cmath.pi * k / N) for k in range(N // 2)]  # factores de giro
+    T = [W[k] * impar[k] for k in range(N // 2)]   # producto twiddle x impar
+    # Combinacion mariposa: primera mitad suma, segunda resta
+    return [par[k] + T[k] for k in range(N // 2)] + \
+           [par[k] - T[k] for k in range(N // 2)]
+
+def ifft(X):
+    """
+    IFFT usando la identidad conjugada:
+        IFFT(X) = conj( FFT( conj(X) ) ) / N
+    Reutiliza fft() sin duplicar codigo; el /N normaliza la energia.
+    """
+    N   = len(X)
+    res = fft([v.conjugate() for v in X])   # FFT del espectro conjugado
+    return [v.conjugate() / N for v in res]  # conjugar y escalar
+
+def energia_bins(X, N):
+    """
+    Energia espectral por coeficiente — Teorema de Parseval discreto:
+        E[k] = |X[k]|² / N
+    La suma de todos los E[k] debe coincidir con la energia de x[n] en tiempo.
+    """
+    return [abs(X[k])**2 / N for k in range(N)]
+
+def calcular_mse(x, x_rec):
+    """
+    Error Cuadratico Medio: MSE = (1/N) · Σ (x[n] - x̂[n])²
+    Mide la distorsion promedio por muestra entre original y reconstruida.
+    """
+    N = len(x)
+    return sum((float(x[n]) - x_rec[n].real)**2 for n in range(N)) / N
+
+def bins_a_hz(N, fs):
+    """
+    Convierte indice de bin a frecuencia en Hz: fk = k · fs / N.
+    Solo se devuelve la mitad positiva (N/2 bins); la negativa es simetrica.
+    """
+    return [k * fs / N for k in range(N // 2)]
+
 
 # ============================================================
-# 1. CAPTURA DE AUDIO (3 segundos desde el micrófono)
+# 1. CAPTURA DE AUDIO
 # ============================================================
-# Se trabaja a 44100 Hz porque es la frecuencia estándar de CD;
-# cubre todo el rango audible humano hasta ~20 kHz sin problemas.
-fs       = 44100
+# fs = 2^13 = 16384 Hz: potencia de 2 exacta, calidad superior a telefono
+# (8000 Hz) y practicamente igual a FM (22050 Hz) para voz.
+# Con DURACION=3 s se obtienen 3*16384 = 49152 muestras;
+# la mayor potencia de 2 que cabe es 2^15 = 32768 (~2 s efectivos).
+fs       = 2**13   # 16384 Hz
 DURACION = 3
 
 sep = "─" * 52
+
+print("  COMPRESION ESPECTRAL — FFT/IFFT ")
 print(sep)
-print("  COMPRESION ESPECTRAL ADAPTATIVA — FFT/IFFT")
-print(sep)
-print(f"  Se graba una señal de audio de {DURACION} segundos.")
-input("  Presionar ENTER para iniciar la grabación")
-print("  Captando señal")
+print(f"  Grabando {DURACION} s a {fs} Hz.")
+input("  Presionar ENTER para iniciar la grabacion")
+print("  Captando senal")
 
 grabacion = sd.rec(int(DURACION * fs), samplerate=fs, channels=1, dtype='float64')
-sd.wait()
-print("  Grabación completada.\n")
+sd.wait()   # bloquea hasta que termina la grabacion
+print("  Grabacion completada.\n")
 
-# Se aplana el array porque sounddevice devuelve forma (N, 1)
-# y el resto del código espera un vector 1D.
+# sounddevice devuelve shape (N, 1); flatten() lo convierte en vector 1D
 audio_raw = grabacion.flatten()
 
-# Se recorta a la potencia de 2 más cercana por debajo del total.
-# Cooley-Tukey funciona mejor (y más rápido) con tamaños 2^k.
+# Recortar a la mayor potencia de 2 <= muestras grabadas.
+# Requerido por Cooley-Tukey: el algoritmo divide por 2 en cada nivel.
 N = 2 ** int(np.floor(np.log2(len(audio_raw))))
 x = audio_raw[:N]
-t = np.arange(N) / fs
+t = np.arange(N) / fs   # eje de tiempo en segundos
 
-print(f"  Muestras grabadas:          {len(audio_raw)}")
-print(f"  Muestras usadas (2^k):      {N}  (2^{int(np.log2(N))})")
+print(f"  Muestras usadas (2^k): {N}  (2^{int(math.log2(N))})")
 
-
-# ── PRE-PROCESAMIENTO ─────────────────────────────────────────
-# Se elimina el offset DC para que el coeficiente X[0] no
-# "robe" energía al resto del espectro y distorsione el análisis.
-# Luego se normaliza a [-1, 1] para comparar señales de
-# distintas fuentes sin depender del volumen de grabación.
-x = x - np.mean(x)
-pico = np.max(np.abs(x))
+# PRE-PROCESAMIENTO:
+# 1) Eliminar offset DC: evita que X[0] domine la energia y distorsione
+#    la seleccion de componentes. El microfono introduce este sesgo.
+# 2) Normalizar a [-1, 1]: permite comparar senales independientemente
+#    del volumen de grabacion y evita amplitudes que desborden el DAC.
+x = x - float(np.mean(x))
+pico = float(np.max(np.abs(x)))
 if pico > 0:
     x = x / pico
 
 
 # ============================================================
-# 2. CÁLCULO DE LA FFT
+# 2. FFT
 # ============================================================
-# Se aplica la FFT de NumPy, que usa Cooley-Tukey internamente.
-# X[k] guarda cuánto hay de cada frecuencia en la señal.
-X     = np.fft.fft(x)
-freqs = np.fft.fftfreq(N, d=1.0 / fs)
-
-# Se calcula la energía de cada coeficiente aplicando Parseval:
-# la energía total en frecuencia debe coincidir con la del tiempo.
-energia_espectral = (np.abs(X) ** 2) / N
-energia_total     = np.sum(energia_espectral)
+# Se convierte x (numpy array) a lista Python antes de llamar fft()
+# porque nuestra implementacion trabaja con listas de complejos nativos.
+print("\n  Calculando FFT")
+X     = fft(x.tolist())      # lista de N numeros complejos X[0..N-1]
+freqs = bins_a_hz(N, fs)     # eje de frecuencias [Hz] para la mitad positiva
+E     = energia_bins(X, N)   # energia de cada coeficiente espectral
+energia_total = sum(E)        # energia total (verificable con sum(x²)/N por Parseval)
 
 
 # ============================================================
-# 3. COMPRESIÓN ESPECTRAL ADAPTATIVA — umbral del 95%
+# 3. COMPRESION ESPECTRAL — umbral del 95%
 # ============================================================
-# no todos los coeficientes valen lo mismo.
-# Se conservan solo los que acumulan el 95% de la energía total
-# y el resto se descarta. Cuanto más compresible es la señal,
+# Se conservan solo los coeficientes que acumulan el 95% de la energia.
+# Los demas se ponen a cero: cuanto mas compresible es la senal,
 # menos coeficientes se necesitan para llegar al umbral.
 UMBRAL = 0.95
 
-# Paso 1: se ordenan los coeficientes de mayor a menor energía
-indices_orden = np.argsort(energia_espectral)[::-1]
+# Ordenar indices de mayor a menor energia (Python puro, sin numpy)
+indices_orden = sorted(range(N), key=lambda i: -E[i])
 
-# Paso 2: se van sumando los más energéticos hasta superar el umbral
+# Acumular los coeficientes mas energeticos hasta superar el umbral
 energia_acum      = 0.0
-indices_retenidos = []
-
+indices_retenidos = set()    # set para busqueda O(1) al construir X_comp
 for idx in indices_orden:
-    energia_acum += energia_espectral[idx]
-    indices_retenidos.append(idx)
+    energia_acum += E[idx]
+    indices_retenidos.add(idx)
     if energia_acum / energia_total >= UMBRAL:
         break
 
 k                = len(indices_retenidos)
-razon_compresion = (1 - k / N) * 100
+razon_compresion = (1 - k / N) * 100   # % de coeficientes eliminados
 
-# Paso 3: se construye el espectro comprimido poniendo a cero
-# todos los coeficientes que no fueron seleccionados.
-X_comp                    = np.zeros(N, dtype=complex)
-X_comp[indices_retenidos] = X[indices_retenidos]
+# Construir espectro comprimido: cero donde el coeficiente no fue seleccionado
+X_comp = [X[i] if i in indices_retenidos else 0+0j for i in range(N)]
 
 
 # ============================================================
-# 4. RECONSTRUCCIÓN CON IFFT
+# 4. IFFT — implementacion propia
 # ============================================================
-# Se aplica la IFFT al espectro comprimido para volver al dominio
-# del tiempo. Se toma solo la parte real porque los errores
-# numéricos dejan una parte imaginaria residual despreciable.
-x_rec = np.fft.ifft(X_comp).real
+# La IFFT convierte el espectro comprimido de vuelta al dominio del tiempo.
+# Se toma solo la parte real; la imaginaria residual es error numerico (~1e-15).
+print("  Calculando IFFT")
+x_rec    = ifft(X_comp)
+x_rec_np = np.array([v.real for v in x_rec])   # convertir a array para graficas y audio
 
 
 # ============================================================
-# 5. MÉTRICAS DE CALIDAD
+# 5. METRICAS
 # ============================================================
-# MSE: error cuadrático medio entre original y reconstruida.
-# SNR: relación señal/error en dB; cuanto más alto, mejor
-# se preservó la señal. Con 95% de energía suele quedar alto.
-MSE                    = np.mean((x - x_rec) ** 2)
+MSE                    = calcular_mse(x, x_rec)
 energia_preservada_pct = (energia_acum / energia_total) * 100
-SNR_dB                 = 10 * np.log10(np.mean(x ** 2) / MSE)
-energia_ord_norm       = np.cumsum(energia_espectral[indices_orden]) / energia_total * 100
+potencia_senal         = sum(float(v)**2 for v in x) / N   # media de x[n]² (Python puro)
+SNR_dB                 = 10 * math.log10(potencia_senal / MSE)  # dB: cuanto mas alto, mejor
+
+# Energia acumulada ordenada para la grafica 7.4 (cumsum manual)
+acum = 0.0
+energia_ord_norm = []
+for idx in indices_orden:
+    acum += E[idx]
+    energia_ord_norm.append(acum / energia_total * 100)
 
 print(sep)
-print(f"  Componentes totales N:          {N}")
-print(f"  Componentes retenidas (k):      {k}")
-print(f"  Razón de compresión:            {razon_compresion:.4f}% coef. eliminados")
-print(f"  Energía total (Parseval):       {energia_total:.4f}")
-print(f"  Energía preservada:             {energia_preservada_pct:.4f}%")
+print(f"  Componentes totales N:     {N}")
+print(f"  Componentes retenidas (k): {k}")
+print(f"  Razon de compresion:       {razon_compresion:.4f}% coef. eliminados")
+print(f"  Energia total (Parseval):  {energia_total:.6f}")
+print(f"  Energia preservada:        {energia_preservada_pct:.4f}%")
 print(sep)
-print(f"  MSE:                            {MSE:.8f}")
-print(f"  SNR (señal/error):              {SNR_dB:.2f} dB")
+print(f"  MSE:                       {MSE:.8f}")
+print(f"  SNR (senal/error):         {SNR_dB:.2f} dB")
 print(sep)
 
 
 # ============================================================
-# 6. REPRODUCCIÓN DE AUDIO
+# 6. REPRODUCCION DE AUDIO
 # ============================================================
-# Se normaliza de nuevo antes de reproducir por si la reconstruida
-# tiene un pico ligeramente distinto al original tras la compresión.
-def normalizar(senal):
-    maximo = np.max(np.abs(senal))
-    return senal / maximo if maximo > 0 else senal
+# Se vuelve a normalizar antes de reproducir porque la reconstruida
+# puede tener un pico ligeramente distinto al original tras la compresion.
+def normalizar(s):
+    m = np.max(np.abs(s))
+    return s / m if m > 0 else s
 
-x_norm     = normalizar(x)
-x_rec_norm = normalizar(x_rec)
-
-print("\n  ── Reproducción de audio ──────────────────")
-input("  Presionar ENTER para escuchar la señal ORIGINAL")
-sd.play(x_norm, samplerate=fs)
+print("\n  ── Reproduccion de audio ──────────────────")
+input("  Presionar ENTER para escuchar la senal ORIGINAL")
+sd.play(normalizar(x), samplerate=fs)
 sd.wait()
 
-input("  Presionar ENTER para escuchar la señal RECONSTRUIDA")
-sd.play(x_rec_norm, samplerate=fs)
+input("  Presionar ENTER para escuchar la senal RECONSTRUIDA")
+sd.play(normalizar(x_rec_np), samplerate=fs)
 sd.wait()
 
-print("  Reproducción finalizada.")
+print("  Reproduccion finalizada.")
 print(sep)
 
 
 # ============================================================
-# 7. VISUALIZACIÓN — gráficas
+# 7. VISUALIZACION
 # ============================================================
 fig = plt.figure(figsize=(16, 13))
 fig.suptitle(
-    "Compresión Espectral Adaptativa — FFT / IFFT  (señal de micrófono)\n",
+    "Compresion Espectral Adaptativa — FFT/IFFT\n",
     fontsize=13, fontweight='bold', y=0.98
 )
 gs = GridSpec(3, 2, figure=fig, hspace=0.52, wspace=0.38)
 
-# Se busca el segundo con mayor energía RMS para que la gráfica
-# temporal muestre la parte más "activa" de la señal y no un
-# fragmento de silencio que no dice nada.
-win_muestras = int(1.0 * fs)
-hop          = win_muestras // 4
-mejor_inicio = 0
-mejor_rms    = 0.0
-for inicio in range(0, N - win_muestras, hop):
-    rms = np.sqrt(np.mean(x[inicio : inicio + win_muestras] ** 2))
+# Buscar la ventana de 1 s con mayor energia RMS.
+# Los primeros instantes suelen ser silencio (antes de hablar),
+# asi que mostrar el segmento mas activo da una comparacion mas honesta.
+win_muestras = min(int(1.0 * fs), N)
+hop          = max(win_muestras // 4, 1)
+mejor_inicio, mejor_rms = 0, 0.0
+for inicio in range(0, N - win_muestras + 1, hop):
+    seg = x[inicio:inicio + win_muestras]
+    rms = math.sqrt(sum(float(v)**2 for v in seg) / win_muestras)
     if rms > mejor_rms:
-        mejor_rms    = rms
-        mejor_inicio = inicio
+        mejor_rms, mejor_inicio = rms, inicio
 
-muestra_ini = mejor_inicio
-muestra_fin = mejor_inicio + win_muestras
-t_seg       = t[muestra_ini:muestra_fin]
-print(f"  Segmento mostrado:  {muestra_ini/fs:.3f} s – {muestra_fin/fs:.3f} s  (mayor energía RMS)")
+ini, fin = mejor_inicio, mejor_inicio + win_muestras
+t_seg    = t[ini:fin]
 
-# ── 7.1  Señal original vs reconstruida (dominio tiempo) ─────
-# Se superponen ambas señales para apreciar a ojo si la compresión
-# introdujo artefactos visibles. Con buen SNR deben ser casi indistinguibles.
+# 7.1 Senal original vs reconstruida en el dominio del tiempo.
+# Se superponen para apreciar si la compresion introdujo artefactos visibles.
 ax1 = fig.add_subplot(gs[0, :])
-ax1.plot(t_seg, x[muestra_ini:muestra_fin],
-         label='Original', color='steelblue', linewidth=1.2, alpha=0.9)
-ax1.plot(t_seg, x_rec[muestra_ini:muestra_fin],
-         label=f'Reconstruida  (k = {k} coeficientes)',
+ax1.plot(t_seg, x[ini:fin],        label='Original',
+         color='steelblue', linewidth=1.2, alpha=0.9)
+ax1.plot(t_seg, x_rec_np[ini:fin], label=f'Reconstruida (k={k})',
          color='tomato', linewidth=1.2, linestyle='--')
-ax1.set_title(f"Señal de Audio Original vs Reconstruida  "
-              f"(1 s de mayor energía: {muestra_ini/fs:.2f}s – {muestra_fin/fs:.2f}s)")
+ax1.set_title(f"Senal Original vs Reconstruida  ({ini/fs:.2f}s – {fin/fs:.2f}s, mayor energia)")
 ax1.set_xlabel("Tiempo [s]")
 ax1.set_ylabel("Amplitud normalizada")
 ax1.legend(loc='upper right')
 ax1.grid(True, alpha=0.3)
 
-# ── 7.2  Espectro de magnitud — original ─────────────────────
-# Solo se grafica la mitad positiva; la negativa es simétrica
-# para señales reales y no aporta información adicional.
-N2        = N // 2
-freqs_pos = freqs[:N2]
-mag_orig  = (2 / N) * np.abs(X[:N2])
-mag_comp  = (2 / N) * np.abs(X_comp[:N2])
+# 7.2 y 7.3 Espectros de magnitud (mitad positiva).
+# El factor 2/N compensa la simetria: la energia de la mitad negativa
+# se "dobla" sobre la positiva para obtener amplitudes reales correctas.
+N2       = N // 2
+mag_orig = np.array([(2 / N) * abs(X[k])      for k in range(N2)])
+mag_comp = np.array([(2 / N) * abs(X_comp[k]) for k in range(N2)])
 
 ax2 = fig.add_subplot(gs[1, 0])
-ax2.plot(freqs_pos, mag_orig, color='steelblue', linewidth=0.6)
+ax2.plot(freqs, mag_orig, color='steelblue', linewidth=0.7)
 ax2.set_title("Espectro de Magnitud — Original")
 ax2.set_xlabel("Frecuencia [Hz]")
 ax2.set_ylabel("|X[k]| normalizado")
 ax2.set_xlim([0, fs / 2])
 ax2.grid(True, alpha=0.3)
 
-# ── 7.3  Espectro de magnitud — comprimido ───────────────────
-# Se espera ver los mismos picos que en el original pero con
-# el piso espectral silenciado; los "huecos" son los coeficientes eliminados.
 ax3 = fig.add_subplot(gs[1, 1])
-ax3.plot(freqs_pos, mag_comp, color='tomato', linewidth=0.6)
-ax3.set_title(f"Espectro de Magnitud — Comprimido\n({k} de {N} coeficientes retenidos)")
+ax3.plot(freqs, mag_comp, color='tomato', linewidth=0.7)
+ax3.set_title(f"Espectro Comprimido  ({k} de {N} coeficientes)")
 ax3.set_xlabel("Frecuencia [Hz]")
 ax3.set_ylabel("|X[k]| normalizado")
 ax3.set_xlim([0, fs / 2])
 ax3.grid(True, alpha=0.3)
 
-# ── 7.4  Curva de energía acumulada vs nº de componentes ─────
-# Se muestra en escala logarítmica porque la mayor parte de la energía
-# se concentra en pocos coeficientes; la curva sube rápido al inicio
-# y luego se aplana. La línea verde marca exactamente dónde se cortó.
+# 7.4 Curva de energia acumulada en escala logaritmica.
+# La mayoria de la energia se concentra en pocos coeficientes, por eso
+# la curva sube bruscamente y luego se aplana. La linea verde indica
+# exactamente cuantos coeficientes se necesitaron para llegar al 95%.
 ax4 = fig.add_subplot(gs[2, 0])
 ax4.plot(range(1, N + 1), energia_ord_norm, color='darkorange', linewidth=2)
 ax4.axhline(y=95, color='red', linestyle='--', linewidth=1.3, label='Umbral 95%')
-ax4.axvline(x=k, color='green', linestyle='--', linewidth=1.3,
-            label=f'k = {k} componentes')
+ax4.axvline(x=k, color='green', linestyle='--', linewidth=1.3, label=f'k = {k}')
 ax4.fill_between(range(1, k + 1), energia_ord_norm[:k], alpha=0.15, color='green')
 ax4.set_xscale('log')
-ax4.set_xlabel("Número de componentes (escala log)")
-ax4.set_ylabel("Energía acumulada [%]")
-ax4.set_title("Energía Acumulada vs N.º de Componentes")
+ax4.set_xlabel("Numero de componentes (escala log)")
+ax4.set_ylabel("Energia acumulada [%]")
+ax4.set_title("Energia Acumulada vs N.o de Componentes")
 ax4.legend()
 ax4.grid(True, alpha=0.3)
 ax4.set_ylim([0, 102])
 
-# ── 7.5  Error de reconstrucción en el tiempo ─────────────────
-# Se grafica x[n] - x̂[n] para ver si el error es ruido blanco
-# (bien distribuido, sin estructura) o si hay zonas donde la
-# compresión introduce distorsión sistemática.
-error = x - x_rec
+# 7.5 Error de reconstruccion: x[n] - x̂[n].
+# Si el error es ruido blanco sin estructura, la compresion es uniforme.
+# Si hay zonas con error alto, la compresion distorsiona esas regiones.
+error = x[ini:fin] - x_rec_np[ini:fin]
 ax5 = fig.add_subplot(gs[2, 1])
-ax5.plot(t_seg, error[muestra_ini:muestra_fin], color='purple', linewidth=1.0)
+ax5.plot(t_seg, error, color='purple', linewidth=1.0)
 ax5.axhline(y=0, color='black', linewidth=0.8)
 ax5.set_title(
-    f"Error de Reconstrucción  x[n] − x̂[n]\n"
+    f"Error de Reconstruccion  x[n] - x_rec[n]\n"
     f"MSE = {MSE:.6f}   |   SNR = {SNR_dB:.2f} dB   |   "
-    f"Energía preservada = {energia_preservada_pct:.3f}%"
+    f"Energia preservada = {energia_preservada_pct:.3f}%"
 )
 ax5.set_xlabel("Tiempo [s]")
 ax5.set_ylabel("Error")
 ax5.grid(True, alpha=0.3)
 
-# Se guarda en la misma carpeta del script para no depender
-# del directorio de trabajo actual desde donde se ejecute.
+# Guardar en la misma carpeta del script para no depender del directorio
+# desde donde se ejecute (os.path.abspath resuelve la ruta absoluta).
 script_dir  = os.path.dirname(os.path.abspath(__file__))
 output_path = os.path.join(script_dir, "compresion_espectral.png")
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 plt.show()
-print(f"\nGráfica guardada en: {output_path}")
+print(f"\nGrafica guardada en: {output_path}")

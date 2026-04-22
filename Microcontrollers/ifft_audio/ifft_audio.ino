@@ -42,6 +42,7 @@
 
 // -- Paquete recibido --------------------------------------
 struct RecvPacket {
+    uint32_t seq;
     int16_t  original[N];
     uint16_t numCoeffs;
     uint16_t indices[N / 2 + 1];
@@ -50,8 +51,48 @@ struct RecvPacket {
 };
 
 // -- Colas FreeRTOS ----------------------------------------
-static QueueHandle_t audioQueue;
+// Guardamos paquetes recibidos en un array FIFO (ring buffer)
+// para asegurar descompresion/IFFT en el mismo orden de llegada.
+#define PACKET_BUFFER_LEN  32
+static RecvPacket* packetBuffer[PACKET_BUFFER_LEN];
+static volatile uint16_t packetHead = 0;
+static volatile uint16_t packetTail = 0;
+static volatile uint16_t packetCount = 0;
+static portMUX_TYPE packetMux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t semItems;
+static SemaphoreHandle_t semSpaces;
+
+// Cola liviana solo para métricas (evita duplicar paquetes grandes)
+struct MetricsFrame {
+    uint32_t seq;
+    double   mse;
+    double   energyPct;
+    double   snr;
+    uint16_t numCoeffs;
+};
 static QueueHandle_t metricsQueue;
+
+static inline bool pushPacket(RecvPacket* pkt, TickType_t timeoutTicks) {
+    if (xSemaphoreTake(semSpaces, timeoutTicks) != pdTRUE) return false;
+    taskENTER_CRITICAL(&packetMux);
+    packetBuffer[packetHead] = pkt;
+    packetHead = (uint16_t)((packetHead + 1) % PACKET_BUFFER_LEN);
+    packetCount++;
+    taskEXIT_CRITICAL(&packetMux);
+    xSemaphoreGive(semItems);
+    return true;
+}
+
+static inline RecvPacket* popPacket(TickType_t timeoutTicks) {
+    if (xSemaphoreTake(semItems, timeoutTicks) != pdTRUE) return nullptr;
+    taskENTER_CRITICAL(&packetMux);
+    RecvPacket* pkt = packetBuffer[packetTail];
+    packetTail = (uint16_t)((packetTail + 1) % PACKET_BUFFER_LEN);
+    packetCount--;
+    taskEXIT_CRITICAL(&packetMux);
+    xSemaphoreGive(semSpaces);
+    return pkt;
+}
 
 // -- LCD 20x4 I2C ------------------------------------------
 static LiquidCrystal_I2C lcd(0x27, 20, 4);
@@ -82,6 +123,7 @@ static void reconstructSpectrum(const RecvPacket* pkt,
 //  Tarea Core 1: recepcion y parseo desde USB-Serial
 // ----------------------------------------------------------
 void taskReceive(void* /*param*/) {
+    static uint32_t seqCounter = 0;
     for (;;) {
         // 1. Sincronizar con cabecera [0xAA][0x55]
         for (;;) {
@@ -108,6 +150,7 @@ void taskReceive(void* /*param*/) {
         if (blockN != N) continue;
 
         RecvPacket* pkt = new RecvPacket();
+        pkt->seq = seqCounter++;
         rbuf(pkt->original, N * sizeof(int16_t));
         rbuf(&pkt->numCoeffs, sizeof(pkt->numCoeffs));
         if (pkt->numCoeffs > N / 2 + 1) {
@@ -127,12 +170,9 @@ void taskReceive(void* /*param*/) {
             delete pkt; continue;
         }
 
-        // Distribuir copia a ambas tareas
-        RecvPacket* pktAudio = new RecvPacket(*pkt);
-        if (xQueueSend(audioQueue, &pktAudio, pdMS_TO_TICKS(50)) != pdTRUE) {
-            delete pktAudio;
-        }
-        if (xQueueSend(metricsQueue, &pkt, pdMS_TO_TICKS(50)) != pdTRUE) {
+        // Guardar en FIFO (array) para procesar estrictamente en orden
+        if (!pushPacket(pkt, pdMS_TO_TICKS(50))) {
+            // buffer lleno -> descartamos el paquete más nuevo
             delete pkt;
         }
     }
@@ -147,7 +187,8 @@ void taskAudio(void* /*param*/) {
     RecvPacket* pkt;
 
     for (;;) {
-        if (xQueueReceive(audioQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
+        pkt = popPacket(portMAX_DELAY);
+        if (!pkt) continue;
 
         reconstructSpectrum(pkt, re, im);
         FFT.compute(FFTDirection::Reverse);
@@ -172,6 +213,29 @@ void taskAudio(void* /*param*/) {
             if ((i & 0x1F) == 0x1F) taskYIELD();
         }
 
+        // Calcular métricas y mandarlas a la tarea LCD (sin bloquear audio con I2C)
+        double mse = 0.0, energyOrig = 0.0, energyRecon = 0.0, errorEnergy = 0.0;
+        for (int i = 0; i < N; i++) {
+            double orig  = static_cast<double>(pkt->original[i]);
+            double recon = re[i];   // arduinoFFT v2.x: IFFT ya normaliza
+            double err   = orig - recon;
+            mse         += err  * err;
+            energyOrig  += orig * orig;
+            energyRecon += recon * recon;
+            errorEnergy += err  * err;
+        }
+        mse /= N;
+        double energyPct = (energyOrig > 0.0) ? (energyRecon / energyOrig) * 100.0 : 0.0;
+        double snr = (errorEnergy > 1e-9) ? 10.0 * log10(energyOrig / errorEnergy) : 99.9;
+
+        MetricsFrame mf;
+        mf.seq = pkt->seq;
+        mf.mse = mse;
+        mf.energyPct = energyPct;
+        mf.snr = snr;
+        mf.numCoeffs = pkt->numCoeffs;
+        (void)xQueueSend(metricsQueue, &mf, 0);
+
         delete pkt;
     }
 }
@@ -180,62 +244,18 @@ void taskAudio(void* /*param*/) {
 //  Tarea Core 1: IFFT + metricas + LCD (Receptor 2)
 // ----------------------------------------------------------
 void taskMetrics(void* /*param*/) {
-    static double re[N], im[N];
-    static ArduinoFFT<double> FFT(re, im, N, SAMPLE_RATE);
-    RecvPacket* pkt;
+    MetricsFrame mf;
 
     for (;;) {
-        if (xQueueReceive(metricsQueue, &pkt, portMAX_DELAY) != pdTRUE) continue;
-
-        reconstructSpectrum(pkt, re, im);
-        FFT.compute(FFTDirection::Reverse);
-
-        // DIAGNOSTICO: imprimir algunos valores para ver la escala
-        static int diagCount = 0;
-        if (diagCount++ < 3) {
-            Serial.print("[DIAG] original[0..3]: ");
-            Serial.print(pkt->original[0]); Serial.print(",");
-            Serial.print(pkt->original[1]); Serial.print(",");
-            Serial.print(pkt->original[2]); Serial.print(",");
-            Serial.println(pkt->original[3]);
-
-            Serial.print("[DIAG] re[0..3] crudo: ");
-            Serial.print(re[0], 2); Serial.print(",");
-            Serial.print(re[1], 2); Serial.print(",");
-            Serial.print(re[2], 2); Serial.print(",");
-            Serial.println(re[3], 2);
-
-            // Ya no dividimos por N — los valores crudos son correctos
-        }
-
-        double mse = 0.0, energyOrig = 0.0, energyRecon = 0.0, errorEnergy = 0.0;
-
-        for (int i = 0; i < N; i++) {
-            double orig  = static_cast<double>(pkt->original[i]);
-            double recon = re[i];   // IFFT v2.x ya normaliza
-            double err   = orig - recon;
-
-            mse         += err  * err;
-            energyOrig  += orig * orig;
-            energyRecon += recon * recon;
-            errorEnergy += err  * err;
-        }
-        mse /= N;
-
-        double energyPct = (energyOrig > 0.0)
-                           ? (energyRecon / energyOrig) * 100.0 : 0.0;
-        double snr = (errorEnergy > 1e-9)
-                     ? 10.0 * log10(energyOrig / errorEnergy) : 99.9;
+        if (xQueueReceive(metricsQueue, &mf, portMAX_DELAY) != pdTRUE) continue;
 
         // LCD
         lcd.clear();
-        lcd.setCursor(0, 0); lcd.print("MSE: ");     lcd.print(mse, 2);
-        lcd.setCursor(0, 1); lcd.print("Energia: "); lcd.print(energyPct, 1); lcd.print("%");
-        lcd.setCursor(0, 2); lcd.print("SNR: ");     lcd.print(snr, 1); lcd.print(" dB");
-        lcd.setCursor(0, 3); lcd.print("K=");        lcd.print(pkt->numCoeffs);
+        lcd.setCursor(0, 0); lcd.print("MSE: ");     lcd.print(mf.mse, 2);
+        lcd.setCursor(0, 1); lcd.print("Energia: "); lcd.print(mf.energyPct, 1); lcd.print("%");
+        lcd.setCursor(0, 2); lcd.print("SNR: ");     lcd.print(mf.snr, 1); lcd.print(" dB");
+        lcd.setCursor(0, 3); lcd.print("K=");        lcd.print(mf.numCoeffs);
                               lcd.print("/"); lcd.print(N / 2 + 1); lcd.print(" bins");
-
-        delete pkt;
     }
 }
 
@@ -254,8 +274,10 @@ void setup() {
 
     dacWrite(SPEAKER_PIN, 128);  // silencio inicial
 
-    audioQueue   = xQueueCreate(4, sizeof(RecvPacket*));
-    metricsQueue = xQueueCreate(4, sizeof(RecvPacket*));
+    // FIFO (array) de paquetes
+    semItems  = xSemaphoreCreateCounting(PACKET_BUFFER_LEN, 0);
+    semSpaces = xSemaphoreCreateCounting(PACKET_BUFFER_LEN, PACKET_BUFFER_LEN);
+    metricsQueue = xQueueCreate(8, sizeof(MetricsFrame));
 
     xTaskCreatePinnedToCore(taskReceive, "RX",     8192, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(taskAudio,   "Audio",  8192, NULL, 2, NULL, 0);

@@ -8,27 +8,13 @@
 //  está integrada en esp32_ifft_audio.ino (taskMetrics, Core 1).
 //  Use este archivo solo si dispone de un tercer ESP32.
 //
-//  Funcionalidad:
-//    - Recibe paquetes del Transmisor via UART2 (GPIO 16=RX)
-//    - Reconstruye la señal con IFFT (simetría hermítica)
-//    - Calcula MSE, energía preservada y SNR (dB)
-//    - Muestra resultados en LCD 20×4 I2C
-//
-//  Nota de conexión para 3 MCUs:
-//    El TX2 del Transmisor puede alimentar ambos receptores en
-//    paralelo (mismo cable, ambos RX2 conectados con resistencias
-//    de 100 Ω en serie para protección de bus).
-//    ESP32 TX (3.3V lógica) puede manejar dos entradas RX sin
-//    problemas a este baud rate.
-//
-//  Protocolo recibido (UART2, 921600 baud):
-//    [0xAA][0x55] N:u16 original:N×i16 K:u16 K×(idx:u16,re:f32,im:f32) crc:u8
-//
 //  Conexión hardware:
 //    GPIO 16 (RX2) ◄── GPIO 17 (TX2) del Transmisor
 //    GND           ◄── GND           del Transmisor
 //    GPIO 21 (SDA) ──► LCD I2C SDA
 //    GPIO 22 (SCL) ──► LCD I2C SCL
+//
+//  Librería requerida: arduinoFFT v2.x
 // ============================================================
 
 #include <Arduino.h>
@@ -37,6 +23,7 @@
 
 // ── Parámetros (deben coincidir con el Transmisor) ──────────
 #define N            256
+#define SAMPLE_RATE  8000.0
 #define UART2_RX_PIN 16
 #define UART2_TX_PIN 17
 #define UART2_BAUD   921600
@@ -46,9 +33,11 @@
 #define ESP_HDR_B  0x55
 
 // ── Buffers globales ────────────────────────────────────────
-static double     vReal[N];
-static double     vImag[N];
-static arduinoFFT FFT;
+static double vReal[N];
+static double vImag[N];
+
+// v2.x: instancia con punteros a los buffers
+static ArduinoFFT<double> FFT(vReal, vImag, N, SAMPLE_RATE);
 
 static int16_t  originalSamples[N];
 static uint16_t coeffIndices[N / 2 + 1];
@@ -59,11 +48,12 @@ static uint16_t numCoeffs;
 // ── LCD 20×4 I2C ───────────────────────────────────────────
 static LiquidCrystal_I2C lcd(0x27, 20, 4);
 
+// ── CRC acumulado ───────────────────────────────────────────
+static uint8_t rxCrc;
+
 // ────────────────────────────────────────────────────────────
 //  Leer exactamente `len` bytes de Serial2 (bloqueante)
 // ────────────────────────────────────────────────────────────
-static uint8_t rxCrc;
-
 static void readByte(uint8_t& b) {
     while (!Serial2.available()) {}
     b = Serial2.read();
@@ -84,10 +74,12 @@ static void reconstructSpectrum() {
 
     for (uint16_t k = 0; k < numCoeffs; k++) {
         uint16_t idx = coeffIndices[k];
-        vReal[idx] = static_cast<double>(coeffRe[k]);
-        vImag[idx] = static_cast<double>(coeffIm[k]);
+        if (idx > N / 2) continue;  // sanidad
 
-        // Conjugado simétrico (señal real)
+        vReal[idx] =  static_cast<double>(coeffRe[k]);
+        vImag[idx] =  static_cast<double>(coeffIm[k]);
+
+        // Bin conjugado simétrico
         if (idx > 0 && idx < N / 2) {
             vReal[N - idx] =  static_cast<double>(coeffRe[k]);
             vImag[N - idx] = -static_cast<double>(coeffIm[k]);
@@ -108,6 +100,9 @@ void setup() {
     lcd.print("Receptor 2 (MSE)");
     lcd.setCursor(0, 1);
     lcd.print("Esperando datos...");
+
+    Serial.println("=== ESP32 Receptor 2 MSE ===");
+    Serial.println("Esperando paquetes del Transmisor...");
 }
 
 // ────────────────────────────────────────────────────────────
@@ -124,19 +119,25 @@ void loop() {
 
     rxCrc = 0;
 
-    // 2. Leer tamaño de bloque N
+    // 2. Leer y validar N del bloque
     uint16_t blockN = 0;
     readBuf(&blockN, sizeof(blockN));
-    if (blockN != N) return;  // descarta paquete inesperado
+    if (blockN != N) {
+        Serial.println("[MSE] WARN: N incorrecto, descartando");
+        return;
+    }
 
     // 3. Muestras originales
     readBuf(originalSamples, N * sizeof(int16_t));
 
-    // 4. K coeficientes
+    // 4. Número de coeficientes
     readBuf(&numCoeffs, sizeof(numCoeffs));
-    if (numCoeffs > N / 2 + 1) return;
+    if (numCoeffs > N / 2 + 1) {
+        Serial.println("[MSE] WARN: numCoeffs fuera de rango");
+        return;
+    }
 
-    // 5. Coeficientes
+    // 5. Coeficientes espectrales
     for (uint16_t k = 0; k < numCoeffs; k++) {
         readBuf(&coeffIndices[k], sizeof(uint16_t));
         readBuf(&coeffRe[k],      sizeof(float));
@@ -145,19 +146,18 @@ void loop() {
 
     // 6. Validar CRC
     uint8_t calcCrc = rxCrc;
-    uint8_t rxd;
     while (!Serial2.available()) {}
-    rxd = Serial2.read();
+    uint8_t rxd = Serial2.read();
     if (rxd != calcCrc) {
         Serial.println("[MSE] CRC error, descartando paquete");
         return;
     }
 
-    // 7. Reconstruir espectro e IFFT
+    // 7. Reconstruir espectro e IFFT (v2.x)
     reconstructSpectrum();
-    FFT.Compute(vReal, vImag, N, FFT_REVERSE);
+    FFT.compute(FFTDirection::Reverse);
 
-    // 8. Calcular métricas
+    // 8. Calcular métricas (IFFT no normaliza → dividir por N)
     double mse         = 0.0;
     double energyOrig  = 0.0;
     double energyRecon = 0.0;
@@ -165,13 +165,13 @@ void loop() {
 
     for (int i = 0; i < N; i++) {
         double orig  = static_cast<double>(originalSamples[i]);
-        double recon = vReal[i] / N;
+        double recon = vReal[i] / static_cast<double>(N);
         double err   = orig - recon;
 
-        mse         += err * err;
-        energyOrig  += orig  * orig;
+        mse         += err  * err;
+        energyOrig  += orig * orig;
         energyRecon += recon * recon;
-        errorEnergy += err   * err;
+        errorEnergy += err  * err;
     }
     mse /= N;
 
@@ -183,13 +183,13 @@ void loop() {
                  ? 10.0 * log10(energyOrig / errorEnergy)
                  : 99.9;
 
-    // 9. Debug serial
+    // 9. Debug por USB-Serial
     Serial.print("[MSE] MSE="); Serial.print(mse, 2);
     Serial.print("  En=");      Serial.print(energyPct, 1); Serial.print("%");
     Serial.print("  SNR=");     Serial.print(snr, 1);       Serial.print("dB");
     Serial.print("  K=");       Serial.println(numCoeffs);
 
-    // 10. Mostrar en LCD
+    // 10. Mostrar en LCD 20×4
     lcd.clear();
 
     lcd.setCursor(0, 0);

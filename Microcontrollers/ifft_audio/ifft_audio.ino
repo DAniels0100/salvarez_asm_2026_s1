@@ -5,9 +5,9 @@
 //  USB-Serial (el PC los lee del ESP32 #1 y los reenvia aqui).
 //
 //  Arquitectura FreeRTOS:
-//    Core 1 — taskReceive : parsea paquetes del PC (USB)
-//    Core 0 — taskAudio   : IFFT -> DAC -> Speaker
-//    Core 1 — taskMetrics : IFFT -> MSE/Energia/SNR -> LCD
+//    Core 0 — taskReceive : parsea paquetes del PC (USB)
+//    Core 1 — taskAudio   : desempaqueta (IFFT) y reproduce al final
+//    Core 0 — taskMetrics : MSE/Energia/SNR global -> LCD
 //
 //  Protocolo PC -> ESP32 (USB, 115200 baud):
 //    [0xAA][0x55]
@@ -32,6 +32,8 @@
 // -- Parametros ---------------------------------------------
 #define N            256
 #define SAMPLE_RATE  8000.0
+// Debe coincidir con el TX / send_audio.py
+#define MAX_BLOCKS   187
 
 // -- Pines --------------------------------------------------
 #define SPEAKER_PIN  25
@@ -65,12 +67,24 @@ static SemaphoreHandle_t semSpaces;
 // Cola liviana solo para métricas (evita duplicar paquetes grandes)
 struct MetricsFrame {
     uint32_t seq;
+    uint16_t totalBlocks;
     double   mse;
     double   energyPct;
     double   snr;
-    uint16_t numCoeffs;
 };
 static QueueHandle_t metricsQueue;
+
+// Estado de una "sesion" de transmision
+static volatile bool     g_sessionActive = false;
+static volatile bool     g_rxEnded = false;
+static volatile uint16_t g_expectedBlocks = 0;
+static volatile uint16_t g_receivedBlocks = 0;
+static volatile uint16_t g_decompressedBlocks = 0;
+static int16_t* g_origAll = nullptr;   // [expectedBlocks * N]
+static int16_t* g_reconAll = nullptr;  // [expectedBlocks * N]
+
+static SemaphoreHandle_t semSessionStart;
+static SemaphoreHandle_t semRxEnd;
 
 static inline bool pushPacket(RecvPacket* pkt, TickType_t timeoutTicks) {
     if (xSemaphoreTake(semSpaces, timeoutTicks) != pdTRUE) return false;
@@ -124,6 +138,35 @@ static void reconstructSpectrum(const RecvPacket* pkt,
 // ----------------------------------------------------------
 void taskReceive(void* /*param*/) {
     static uint32_t seqCounter = 0;
+
+    auto resetSession = [&]() {
+        g_sessionActive = false;
+        g_rxEnded = false;
+        g_expectedBlocks = 0;
+        g_receivedBlocks = 0;
+        g_decompressedBlocks = 0;
+        if (g_origAll) { free(g_origAll); g_origAll = nullptr; }
+        if (g_reconAll) { free(g_reconAll); g_reconAll = nullptr; }
+        // Vaciar FIFO (si hubiese basura)
+        for (;;) {
+            RecvPacket* p = popPacket(0);
+            if (!p) break;
+            delete p;
+        }
+        // Re-inicializar semáforos de la FIFO
+        if (semItems) {
+            while (xSemaphoreTake(semItems, 0) == pdTRUE) {}
+        }
+        if (semSpaces) {
+            while (xSemaphoreTake(semSpaces, 0) == pdTRUE) {}
+            for (int i = 0; i < PACKET_BUFFER_LEN; i++) xSemaphoreGive(semSpaces);
+        }
+        taskENTER_CRITICAL(&packetMux);
+        packetHead = packetTail = packetCount = 0;
+        taskEXIT_CRITICAL(&packetMux);
+    };
+
+    resetSession();
     for (;;) {
         // 1. Sincronizar con cabecera [0xAA][0x55]
         for (;;) {
@@ -147,7 +190,68 @@ void taskReceive(void* /*param*/) {
 
         uint16_t blockN = 0;
         rbuf(&blockN, sizeof(blockN));
+
+        // ---- Control frames ----
+        // Formato:
+        //  [AA55][blockN=0x0000][cmd:u8][(totalBlocks:u16 si cmd=1)][crc:u8]
+        if (blockN == 0) {
+            uint8_t cmd = 0;
+            rb(cmd);
+            uint16_t totalBlocks = 0;
+            if (cmd == 1) {
+                rbuf(&totalBlocks, sizeof(totalBlocks));
+            }
+            uint8_t rxCrc;
+            while (!Serial.available()) taskYIELD();
+            rxCrc = Serial.read();
+            if (rxCrc != crc) {
+                continue;
+            }
+
+            if (cmd == 1) {
+                // START
+                resetSession();
+                if (totalBlocks == 0) totalBlocks = 1;
+                if (totalBlocks > MAX_BLOCKS) totalBlocks = MAX_BLOCKS;
+                g_expectedBlocks = totalBlocks;
+
+                g_origAll = (int16_t*)malloc((size_t)g_expectedBlocks * N * sizeof(int16_t));
+                g_reconAll = (int16_t*)malloc((size_t)g_expectedBlocks * N * sizeof(int16_t));
+                if (!g_origAll || !g_reconAll) {
+                    if (g_origAll) { free(g_origAll); g_origAll = nullptr; }
+                    if (g_reconAll) { free(g_reconAll); g_reconAll = nullptr; }
+                    // No hay RAM -> descartar sesion
+                    continue;
+                }
+
+                g_sessionActive = true;
+                g_rxEnded = false;
+                xSemaphoreGive(semSessionStart);
+
+                // Primer update al LCD: progreso 0/N
+                MetricsFrame mf;
+                mf.seq = 0;
+                mf.totalBlocks = g_expectedBlocks;
+                mf.mse = 0.0;
+                mf.energyPct = 0.0;
+                mf.snr = 0.0;
+                (void)xQueueSend(metricsQueue, &mf, 0);
+            } else if (cmd == 2) {
+                // END
+                if (g_sessionActive) {
+                    g_rxEnded = true;
+                    xSemaphoreGive(semRxEnd);
+                }
+            }
+            continue;
+        }
+
+        // ---- Data frames ----
         if (blockN != N) continue;
+        if (!g_sessionActive || !g_origAll || !g_reconAll) {
+            // Si llegan datos sin START, los descartamos
+            continue;
+        }
 
         RecvPacket* pkt = new RecvPacket();
         pkt->seq = seqCounter++;
@@ -170,6 +274,18 @@ void taskReceive(void* /*param*/) {
             delete pkt; continue;
         }
 
+        // Guardar originales en el buffer global (por orden de llegada)
+        uint16_t blk = g_receivedBlocks;
+        if (blk < g_expectedBlocks) {
+            memcpy(&g_origAll[(size_t)blk * N], pkt->original, N * sizeof(int16_t));
+            pkt->seq = blk; // re-etiquetar con indice de bloque
+            g_receivedBlocks++;
+        } else {
+            // Llegaron mas bloques de los esperados
+            delete pkt;
+            continue;
+        }
+
         // Guardar en FIFO (array) para procesar estrictamente en orden
         if (!pushPacket(pkt, pdMS_TO_TICKS(50))) {
             // buffer lleno -> descartamos el paquete más nuevo
@@ -186,57 +302,118 @@ void taskAudio(void* /*param*/) {
     static ArduinoFFT<double> FFT(re, im, N, SAMPLE_RATE);
     RecvPacket* pkt;
 
+    // Acumuladores de métricas globales (toda la sesion)
+    double sumErr2 = 0.0;
+    double sumOrig2 = 0.0;
+    double sumRecon2 = 0.0;
+    double maxAbsRecon = 1.0;
+    uint32_t sampleCount = 0;
+
     for (;;) {
-        pkt = popPacket(portMAX_DELAY);
-        if (!pkt) continue;
+        // Esperar inicio de sesion
+        if (xSemaphoreTake(semSessionStart, portMAX_DELAY) != pdTRUE) continue;
 
-        reconstructSpectrum(pkt, re, im);
-        FFT.compute(FFTDirection::Reverse);
+        // Reset acumuladores
+        sumErr2 = 0.0;
+        sumOrig2 = 0.0;
+        sumRecon2 = 0.0;
+        maxAbsRecon = 1.0;
+        sampleCount = 0;
 
-        // Mapeo con ganancia — la senal reconstruida suele estar
-        // en un rango pequeno (cientos a pocos miles), no en ±32768.
-        // Escalamos dinamicamente buscando el maximo del bloque.
-        double maxAbs = 1.0;
-        for (int i = 0; i < N; i++) {
-            double v = fabs(re[i]);
-            if (v > maxAbs) maxAbs = v;
+        // --- Fase A: desempaquetar (IFFT) mientras llegan datos ---
+        for (;;) {
+            // Tomar paquetes en orden; si se termina RX, salimos cuando se hayan procesado todos
+            pkt = popPacket(pdMS_TO_TICKS(50));
+            if (!pkt) {
+                // Si ya recibimos END y no hay mas en FIFO, terminamos el desempaquetado
+                if (g_rxEnded) break;
+                // Aun no hay paquete disponible
+                continue;
+            }
+
+            reconstructSpectrum(pkt, re, im);
+            FFT.compute(FFTDirection::Reverse);
+
+            const uint16_t blk = (uint16_t)pkt->seq;
+            if (g_reconAll && blk < g_expectedBlocks) {
+                for (int i = 0; i < N; i++) {
+                    double recon = re[i];
+                    double orig = (double)g_origAll[(size_t)blk * N + i];
+                    double err = orig - recon;
+
+                    sumErr2 += err * err;
+                    sumOrig2 += orig * orig;
+                    sumRecon2 += recon * recon;
+                    sampleCount++;
+
+                    double a = fabs(recon);
+                    if (a > maxAbsRecon) maxAbsRecon = a;
+
+                    // Guardar reconstruido (clamp a int16)
+                    double cl = recon;
+                    if (cl > 32767.0) cl = 32767.0;
+                    if (cl < -32768.0) cl = -32768.0;
+                    g_reconAll[(size_t)blk * N + i] = (int16_t)lrint(cl);
+                }
+
+                g_decompressedBlocks++;
+
+                // Actualización de métricas cada ~10 bloques (métrica global parcial)
+                if ((g_decompressedBlocks % 10) == 0 && sampleCount > 0) {
+                    MetricsFrame mf;
+                    mf.seq = g_decompressedBlocks;
+                    mf.totalBlocks = g_expectedBlocks;
+                    mf.mse = sumErr2 / (double)sampleCount;
+                    mf.energyPct = (sumOrig2 > 0.0) ? (sumRecon2 / sumOrig2) * 100.0 : 0.0;
+                    mf.snr = (sumErr2 > 1e-9) ? 10.0 * log10(sumOrig2 / sumErr2) : 99.9;
+                    (void)xQueueSend(metricsQueue, &mf, 0);
+                }
+            }
+
+            delete pkt;
         }
-        // Factor que lleva maxAbs a 127 (rango util del DAC)
-        double gain = 127.0 / maxAbs;
 
-        for (int i = 0; i < N; i++) {
-            double s = re[i] * gain;                  // [-127, 127]
-            int dacVal = (int)(s + 128.0);            // [0, 255]
-            dacWrite(SPEAKER_PIN, (uint8_t)constrain(dacVal, 0, 255));
-            delayMicroseconds(125);                   // 8 kHz
-
-            if ((i & 0x1F) == 0x1F) taskYIELD();
+        // Esperar a que llegue END (si aun no llegó)
+        if (!g_rxEnded) {
+            (void)xSemaphoreTake(semRxEnd, portMAX_DELAY);
         }
 
-        // Calcular métricas y mandarlas a la tarea LCD (sin bloquear audio con I2C)
-        double mse = 0.0, energyOrig = 0.0, energyRecon = 0.0, errorEnergy = 0.0;
-        for (int i = 0; i < N; i++) {
-            double orig  = static_cast<double>(pkt->original[i]);
-            double recon = re[i];   // arduinoFFT v2.x: IFFT ya normaliza
-            double err   = orig - recon;
-            mse         += err  * err;
-            energyOrig  += orig * orig;
-            energyRecon += recon * recon;
-            errorEnergy += err  * err;
+        // Métricas finales (globales)
+        if (sampleCount > 0) {
+            MetricsFrame mf;
+            mf.seq = g_expectedBlocks;
+            mf.totalBlocks = g_expectedBlocks;
+            mf.mse = sumErr2 / (double)sampleCount;
+            mf.energyPct = (sumOrig2 > 0.0) ? (sumRecon2 / sumOrig2) * 100.0 : 0.0;
+            mf.snr = (sumErr2 > 1e-9) ? 10.0 * log10(sumOrig2 / sumErr2) : 99.9;
+            (void)xQueueSend(metricsQueue, &mf, portMAX_DELAY);
         }
-        mse /= N;
-        double energyPct = (energyOrig > 0.0) ? (energyRecon / energyOrig) * 100.0 : 0.0;
-        double snr = (errorEnergy > 1e-9) ? 10.0 * log10(energyOrig / errorEnergy) : 99.9;
 
-        MetricsFrame mf;
-        mf.seq = pkt->seq;
-        mf.mse = mse;
-        mf.energyPct = energyPct;
-        mf.snr = snr;
-        mf.numCoeffs = pkt->numCoeffs;
-        (void)xQueueSend(metricsQueue, &mf, 0);
+        // --- Fase B: reproducir SOLO cuando terminó la transmisión ---
+        // Ganancia global para DAC: maxAbsRecon -> 127
+        double gain = 127.0 / maxAbsRecon;
+        // Reproducimos solo lo que realmente se alcanzó a desempaquetar.
+        // Si hubo drops, esto evita leer basura/memoria sin escribir.
+        const uint16_t blocksToPlay = g_decompressedBlocks;
+        for (uint16_t blk = 0; blk < blocksToPlay; blk++) {
+            for (int i = 0; i < N; i++) {
+                double recon = (double)g_reconAll[(size_t)blk * N + i];
+                double s = recon * gain;
+                int dacVal = (int)(s + 128.0);
+                dacWrite(SPEAKER_PIN, (uint8_t)constrain(dacVal, 0, 255));
+                delayMicroseconds(125);
+            }
+            taskYIELD();
+        }
 
-        delete pkt;
+        // Termina la sesion: liberar buffers
+        if (g_origAll) { free(g_origAll); g_origAll = nullptr; }
+        if (g_reconAll) { free(g_reconAll); g_reconAll = nullptr; }
+        g_sessionActive = false;
+        g_rxEnded = false;
+        g_expectedBlocks = 0;
+        g_receivedBlocks = 0;
+        g_decompressedBlocks = 0;
     }
 }
 
@@ -254,8 +431,11 @@ void taskMetrics(void* /*param*/) {
         lcd.setCursor(0, 0); lcd.print("MSE: ");     lcd.print(mf.mse, 2);
         lcd.setCursor(0, 1); lcd.print("Energia: "); lcd.print(mf.energyPct, 1); lcd.print("%");
         lcd.setCursor(0, 2); lcd.print("SNR: ");     lcd.print(mf.snr, 1); lcd.print(" dB");
-        lcd.setCursor(0, 3); lcd.print("K=");        lcd.print(mf.numCoeffs);
-                              lcd.print("/"); lcd.print(N / 2 + 1); lcd.print(" bins");
+        lcd.setCursor(0, 3);
+        lcd.print("Blk: ");
+        lcd.print((unsigned long)mf.seq);
+        lcd.print("/");
+        lcd.print(mf.totalBlocks);
     }
 }
 
@@ -279,9 +459,14 @@ void setup() {
     semSpaces = xSemaphoreCreateCounting(PACKET_BUFFER_LEN, PACKET_BUFFER_LEN);
     metricsQueue = xQueueCreate(8, sizeof(MetricsFrame));
 
-    xTaskCreatePinnedToCore(taskReceive, "RX",     8192, NULL, 3, NULL, 1);
-    xTaskCreatePinnedToCore(taskAudio,   "Audio",  8192, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(taskMetrics, "Metrics", 8192, NULL, 1, NULL, 1);
+    semSessionStart = xSemaphoreCreateBinary();
+    semRxEnd = xSemaphoreCreateBinary();
+
+    // Core 0: RX + LCD (UI)
+    // Core 1: Audio (desempaquetado + reproduccion)
+    xTaskCreatePinnedToCore(taskReceive, "RX",      8192, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(taskMetrics, "Metrics", 8192, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(taskAudio,   "Audio",   8192, NULL, 2, NULL, 1);
 }
 
 void loop() {

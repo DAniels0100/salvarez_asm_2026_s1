@@ -37,24 +37,6 @@ START_HEADER = bytes([0xAB, 0xCD])
 END_FOOTER   = bytes([0xEF, 0x01])
 PKT_HDR      = bytes([0xAA, 0x55])
 
-# Control frames (PC -> RX) using the same [0xAA][0x55] sync:
-#   [AA55][blockN=0x0000][cmd:u8][(totalBlocks:u16 si cmd=1)][crc:u8]
-# cmd: 1=START, 2=END
-
-
-def build_control_frame(cmd: int, total_blocks: int | None = None) -> bytes:
-    blockN = 0
-    payload = struct.pack('<H', blockN) + struct.pack('<B', cmd)
-    if cmd == 1:
-        if total_blocks is None:
-            raise ValueError('total_blocks requerido para START')
-        payload += struct.pack('<H', int(total_blocks) & 0xFFFF)
-
-    crc = 0
-    for b in payload:
-        crc ^= b
-    return PKT_HDR + payload + struct.pack('<B', crc)
-
 # Tamano de cada paquete binario recibido del TX
 # 2 (N) + 256*2 (original) + 2 (K) + Kmax*(2+4+4) = variable
 # Maximo: 2 + 512 + 2 + 129*10 + 1 = 1807 bytes
@@ -255,10 +237,6 @@ def run_bridge(port_tx: str, port_rx: str, audio: np.ndarray, verbose: bool):
         packets_ok = 0
         packets_fail = 0
 
-        # Avisar al RX que empieza una sesion (cantidad de bloques)
-        ser_rx.write(build_control_frame(1, total_blocks))
-        ser_rx.flush()
-
         for i in range(total_blocks):
             pkt = read_packet(ser_tx, verbose)
             if pkt is None:
@@ -279,10 +257,6 @@ def run_bridge(port_tx: str, port_rx: str, audio: np.ndarray, verbose: bool):
             # Cadencia real del audio: N/Fs = 256/8000 = 32ms por bloque
             # Esto permite al receptor reproducir sin gaps
             time.sleep(0.028)
-
-        # Avisar al RX que terminó la sesion
-        ser_rx.write(build_control_frame(2))
-        ser_rx.flush()
 
         print(f"\n\n  Puenteados: {packets_ok}/{total_blocks}")
         print(f"  Fallidos:   {packets_fail}/{total_blocks}")

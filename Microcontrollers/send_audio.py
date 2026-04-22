@@ -1,17 +1,16 @@
 """
-send_audio.py — Envia un archivo .wav al ESP32 Transmisor por Serial (modo preload).
+send_audio.py — Envia .wav al ESP32 #1 y actua como puente al ESP32 #2.
 
-El script envia todo el audio de una vez con el protocolo:
-  [0xAB][0xCD] + num_blocks (uint16 LE) + datos (N*num_blocks*2 bytes) + [0xEF][0x01]
-
-El ESP32 guarda todo en RAM, hace FFT+compresion y transmite al receptor.
+Flujo:
+  1. Carga el .wav y lo envia al ESP32 #1 por USB
+  2. ESP32 #1 hace FFT + compresion y devuelve paquetes binarios al PC
+  3. PC lee los paquetes binarios y los reenvia al ESP32 #2 por USB
 
 Uso:
-    python send_audio.py <archivo.wav> <puerto> [--verbose]
+    python send_audio.py <wav> <puerto_tx> <puerto_rx> [--verbose]
 
-Ejemplos:
-    python send_audio.py audio.wav /dev/cu.SLAB_USBtoUART6
-    python send_audio.py audio.wav /dev/cu.SLAB_USBtoUART6 --verbose
+Ejemplo:
+    python send_audio.py audio.wav /dev/cu.SLAB_USBtoUART6 /dev/cu.SLAB_USBtoUART --verbose
 
 Dependencias:
     pip install pyserial numpy scipy
@@ -28,23 +27,27 @@ import scipy.io.wavfile as wavfile
 import scipy.signal as sig
 import serial
 
-# -- Parametros — deben coincidir con el .ino ---------------
+# -- Parametros (deben coincidir con los .ino) --------------
 N          = 256
 TARGET_FS  = 8000
-BAUD_PC    = 115200
-MAX_BLOCKS = 187      # igual que en el .ino (6 segundos max)
+BAUD       = 115200
+MAX_BLOCKS = 187
 
-# Cabeceras del protocolo
 START_HEADER = bytes([0xAB, 0xCD])
 END_FOOTER   = bytes([0xEF, 0x01])
+PKT_HDR      = bytes([0xAA, 0x55])
+
+# Tamano de cada paquete binario recibido del TX
+# 2 (N) + 256*2 (original) + 2 (K) + Kmax*(2+4+4) = variable
+# Maximo: 2 + 512 + 2 + 129*10 + 1 = 1807 bytes
+# Minimo: 2 + 512 + 2 + 1*10 + 1 = 527 bytes
 
 
 # -----------------------------------------------------------
-#  Carga y normalizacion del WAV
+#  Carga WAV
 # -----------------------------------------------------------
 def load_wav(path: str) -> np.ndarray:
     fs, data = wavfile.read(path)
-
     dtype = data.dtype
     if dtype == np.uint8:
         audio = (data.astype(np.float64) - 128.0) * 256.0
@@ -72,104 +75,201 @@ def load_wav(path: str) -> np.ndarray:
 
 
 # -----------------------------------------------------------
-#  Hilo lector: muestra respuestas del ESP32
+#  Lee un paquete binario completo del ESP32 #1
 # -----------------------------------------------------------
-def reader_thread(ser: serial.Serial, stop_event: threading.Event):
+def read_packet(ser_tx: serial.Serial, verbose: bool):
+    """
+    Lee bytes hasta encontrar [0xAA][0x55], luego el paquete completo.
+    Devuelve el paquete completo (con header) o None si timeout.
+    Ignora lineas de texto (logs) antes del binario.
+    """
+    # Buscar sincronizacion [0xAA][0x55]
+    # Mientras buscamos, tambien imprimimos logs de texto
+    line_buf = bytearray()
+    t0 = time.time()
+
+    while True:
+        if time.time() - t0 > 30:
+            return None  # timeout global
+
+        if ser_tx.in_waiting < 1:
+            time.sleep(0.001)
+            continue
+
+        b = ser_tx.read(1)
+        if not b:
+            continue
+
+        # Acumular potencial linea de texto
+        line_buf.append(b[0])
+
+        # Si llega '\n', era una linea de log
+        if b == b'\n':
+            try:
+                line = line_buf.decode('utf-8', errors='replace').rstrip()
+                if verbose and line:
+                    print(f"  [TX] {line}")
+            except Exception:
+                pass
+            line_buf = bytearray()
+            continue
+
+        # Si llevamos 2 bytes y coinciden con header, sync encontrada
+        if len(line_buf) >= 2 and line_buf[-2] == 0xAA and line_buf[-1] == 0x55:
+            break
+
+        # Evitar crecimiento ilimitado del line_buf si no hay newlines
+        if len(line_buf) > 4096:
+            line_buf = line_buf[-2:]
+
+    # Leer cuerpo del paquete
+    # Primero: N (2 bytes) + original (512 bytes) + K (2 bytes)
+    header_rest = ser_tx.read(2 + 512 + 2)
+    if len(header_rest) < 516:
+        return None
+
+    N_val = struct.unpack('<H', header_rest[0:2])[0]
+    if N_val != N:
+        return None
+
+    K = struct.unpack('<H', header_rest[514:516])[0]
+    if K > N // 2 + 1:
+        return None
+
+    # Leer K coeficientes (cada uno 10 bytes: u16 + f32 + f32)
+    coeffs = ser_tx.read(K * 10)
+    if len(coeffs) < K * 10:
+        return None
+
+    # Leer CRC
+    crc_byte = ser_tx.read(1)
+    if len(crc_byte) < 1:
+        return None
+
+    # Reconstruir paquete completo a enviar al receptor
+    # Formato: [0xAA][0x55] + header_rest + coeffs + crc
+    packet = bytes(PKT_HDR) + bytes(header_rest) + bytes(coeffs) + bytes(crc_byte)
+    return packet
+
+
+# -----------------------------------------------------------
+#  Hilo lector del RX — muestra lo que el ESP32 #2 imprime
+# -----------------------------------------------------------
+def rx_reader(ser_rx: serial.Serial, stop_event: threading.Event):
+    buf = bytearray()
     while not stop_event.is_set():
         try:
-            if ser.in_waiting:
-                line = ser.readline().decode("utf-8", errors="replace").rstrip()
-                if line:
-                    print(f"  [ESP32] {line}")
+            if ser_rx.in_waiting:
+                data = ser_rx.read(ser_rx.in_waiting)
+                buf.extend(data)
+                # Imprimir lineas completas
+                while b'\n' in buf:
+                    line, _, buf = buf.partition(b'\n')
+                    try:
+                        txt = line.decode('utf-8', errors='replace').rstrip()
+                        if txt:
+                            print(f"  [RX] {txt}")
+                    except Exception:
+                        pass
         except Exception:
             break
-        time.sleep(0.005)
+        time.sleep(0.01)
 
 
 # -----------------------------------------------------------
 #  Envio principal
 # -----------------------------------------------------------
-def send_audio(port: str, audio: np.ndarray, verbose: bool = False):
-    # Calcular bloques — limitar a MAX_BLOCKS
+def run_bridge(port_tx: str, port_rx: str, audio: np.ndarray, verbose: bool):
     total_blocks = len(audio) // N
     if total_blocks > MAX_BLOCKS:
-        print(f"  WARN: audio tiene {total_blocks} bloques, recortando a {MAX_BLOCKS} ({MAX_BLOCKS*N/TARGET_FS:.1f}s)")
+        print(f"  WARN: recortando a {MAX_BLOCKS} bloques ({MAX_BLOCKS*N/TARGET_FS:.1f}s)")
         total_blocks = MAX_BLOCKS
         audio = audio[:total_blocks * N]
 
-    total_bytes = total_blocks * N * 2  # int16 = 2 bytes
+    total_bytes = total_blocks * N * 2
 
     print(f"\n{'─'*50}")
-    print(f"  Puerto    : {port}  ({BAUD_PC} baud)")
-    print(f"  Bloques   : {total_blocks} x {N} muestras = {total_blocks*N/TARGET_FS:.1f}s")
-    print(f"  Datos     : {total_bytes/1024:.1f} KB a transferir")
+    print(f"  ESP32 #1 (TX): {port_tx}")
+    print(f"  ESP32 #2 (RX): {port_rx}")
+    print(f"  Bloques:       {total_blocks} ({total_blocks*N/TARGET_FS:.1f}s)")
+    print(f"  Datos:         {total_bytes/1024:.1f} KB")
     print(f"{'─'*50}\n")
 
-    with serial.Serial(port, BAUD_PC, timeout=5) as ser:
-        print("Esperando reset del ESP32 (2s)...")
+    # Abrir ambos puertos
+    ser_tx = serial.Serial(port_tx, BAUD, timeout=2)
+    ser_rx = serial.Serial(port_rx, BAUD, timeout=2)
+
+    try:
+        print("Esperando reset de las ESP32 (2s)...")
         time.sleep(2)
-        ser.reset_input_buffer()
+        ser_tx.reset_input_buffer()
+        ser_rx.reset_input_buffer()
 
-        stop_event = threading.Event()
-        if verbose:
-            t = threading.Thread(target=reader_thread,
-                                 args=(ser, stop_event), daemon=True)
-            t.start()
+        # Lanzar hilo que lee logs del RX
+        rx_stop = threading.Event()
+        rx_thread = threading.Thread(target=rx_reader,
+                                     args=(ser_rx, rx_stop), daemon=True)
+        rx_thread.start()
 
-        try:
-            # 1. Enviar cabecera de inicio
-            print("Enviando cabecera...")
-            ser.write(START_HEADER)
+        # ---- FASE 1: Enviar audio al TX ----
+        print("\n[FASE 1] Enviando audio al ESP32 #1...")
+        ser_tx.write(START_HEADER)
+        ser_tx.write(struct.pack('<H', total_blocks))
 
-            # 2. Enviar numero de bloques (uint16 little-endian)
-            ser.write(struct.pack('<H', total_blocks))
+        raw = audio[:total_blocks * N].tobytes()
+        chunk_size = 1024
+        sent = 0
+        t0 = time.perf_counter()
+        while sent < len(raw):
+            chunk = raw[sent:sent + chunk_size]
+            ser_tx.write(chunk)
+            sent += len(chunk)
+            pct = sent / len(raw) * 100
+            bar = "#" * int(pct / 5)
+            print(f"\r  [{bar:<20}] {pct:5.1f}%", end="", flush=True)
 
-            # 3. Enviar todos los datos de audio
-            print(f"Enviando {total_bytes/1024:.1f} KB de audio...")
-            raw = audio[:total_blocks * N].tobytes()
+        ser_tx.write(END_FOOTER)
+        ser_tx.flush()
+        print(f"\n  Audio enviado en {time.perf_counter()-t0:.1f}s")
 
-            chunk_size = 1024
-            sent = 0
-            t0 = time.perf_counter()
-            while sent < len(raw):
-                chunk = raw[sent:sent+chunk_size]
-                ser.write(chunk)
-                sent += len(chunk)
+        # ---- FASE 2: Leer coeficientes del TX y reenviarlos al RX ----
+        print(f"\n[FASE 2] Puenteando paquetes TX -> RX...")
+        packets_ok = 0
+        packets_fail = 0
 
-                pct = sent / len(raw) * 100
-                bar = "#" * int(pct / 5)
-                elapsed = time.perf_counter() - t0
-                kbps = (sent / 1024) / elapsed if elapsed > 0 else 0
-                print(f"\r  [{bar:<20}] {pct:5.1f}%  {sent//1024}/{len(raw)//1024} KB  {kbps:.0f} KB/s",
-                      end="", flush=True)
+        for i in range(total_blocks):
+            pkt = read_packet(ser_tx, verbose)
+            if pkt is None:
+                packets_fail += 1
+                print(f"\n  [{i+1}/{total_blocks}] ERROR: paquete no recibido")
+                continue
 
-            print(f"\r  [{'#'*20}] 100.0%  {len(raw)//1024}/{len(raw)//1024} KB")
+            # Reenviar al receptor
+            ser_rx.write(pkt)
+            ser_rx.flush()
+            packets_ok += 1
 
-            # 4. Enviar footer de fin
-            ser.write(END_FOOTER)
-            ser.flush()
+            pct = (i + 1) / total_blocks * 100
+            bar = "#" * int(pct / 5)
+            print(f"\r  [{bar:<20}] {pct:5.1f}%  {packets_ok} OK / {packets_fail} fail  (pkt {len(pkt)}B)",
+                  end="", flush=True)
 
-            elapsed = time.perf_counter() - t0
-            print(f"  Audio enviado en {elapsed:.1f}s")
-            print(f"  Velocidad promedio: {(total_bytes/1024)/elapsed:.0f} KB/s")
-            print("\nEsperando que el ESP32 procese y transmita al receptor...")
-            print("(Esto puede tomar unos segundos)\n")
+            # Pequena pausa para que el receptor procese
+            time.sleep(0.01)
 
-            # Esperar respuestas del ESP32 mientras procesa
-            if verbose:
-                # Dar tiempo al ESP32 para procesar todo
-                process_time = total_blocks * 0.035  # ~35ms por bloque
-                print(f"  Tiempo estimado de procesamiento: {process_time:.0f}s")
-                time.sleep(process_time + 5)
-            else:
-                time.sleep(10)
+        print(f"\n\n  Puenteados: {packets_ok}/{total_blocks}")
+        print(f"  Fallidos:   {packets_fail}/{total_blocks}")
 
-        except KeyboardInterrupt:
-            print("\n\nInterrumpido por el usuario.")
-        finally:
-            stop_event.set()
-
-    print("Puerto cerrado.")
+    except KeyboardInterrupt:
+        print("\n\nInterrumpido.")
+    finally:
+        # Dar tiempo a que el RX termine de imprimir
+        time.sleep(1)
+        try: rx_stop.set()
+        except: pass
+        ser_tx.close()
+        ser_rx.close()
+        print("Puertos cerrados.")
 
 
 # -----------------------------------------------------------
@@ -177,12 +277,13 @@ def send_audio(port: str, audio: np.ndarray, verbose: bool = False):
 # -----------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Envia un .wav al ESP32 Transmisor (modo preload)."
+        description="Envia .wav al ESP32 #1 y puentea coeficientes al ESP32 #2."
     )
-    parser.add_argument("wav",    help="Ruta al archivo .wav")
-    parser.add_argument("puerto", help="Puerto serial")
+    parser.add_argument("wav",       help="Archivo .wav")
+    parser.add_argument("puerto_tx", help="Puerto del ESP32 #1 (Transmisor)")
+    parser.add_argument("puerto_rx", help="Puerto del ESP32 #2 (Receptor)")
     parser.add_argument("--verbose", action="store_true",
-                        help="Mostrar respuestas del ESP32")
+                        help="Mostrar logs del ESP32 #1")
     args = parser.parse_args()
 
     print(f"\nCargando '{args.wav}'...")
@@ -191,12 +292,9 @@ def main():
     except FileNotFoundError:
         print(f"Error: no se encontro '{args.wav}'")
         sys.exit(1)
-    except Exception as e:
-        print(f"Error al cargar WAV: {e}")
-        sys.exit(1)
 
-    print(f"  OK — {len(audio)} muestras int16 @ {TARGET_FS} Hz ({len(audio)/TARGET_FS:.1f}s)")
-    send_audio(args.puerto, audio, verbose=args.verbose)
+    print(f"  OK — {len(audio)} muestras @ {TARGET_FS} Hz ({len(audio)/TARGET_FS:.1f}s)")
+    run_bridge(args.puerto_tx, args.puerto_rx, audio, verbose=args.verbose)
 
 
 if __name__ == "__main__":

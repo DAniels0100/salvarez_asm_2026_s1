@@ -152,12 +152,22 @@ void taskAudio(void* /*param*/) {
         reconstructSpectrum(pkt, re, im);
         FFT.compute(FFTDirection::Reverse);
 
+        // Mapeo con ganancia — la senal reconstruida suele estar
+        // en un rango pequeno (cientos a pocos miles), no en ±32768.
+        // Escalamos dinamicamente buscando el maximo del bloque.
+        double maxAbs = 1.0;
         for (int i = 0; i < N; i++) {
-            // IFFT v2.x ya normaliza — usar re[i] directo
-            double s = re[i];
-            int dacVal = static_cast<int>((s + 32768.0) * 255.0 / 65535.0);
+            double v = fabs(re[i]);
+            if (v > maxAbs) maxAbs = v;
+        }
+        // Factor que lleva maxAbs a 127 (rango util del DAC)
+        double gain = 127.0 / maxAbs;
+
+        for (int i = 0; i < N; i++) {
+            double s = re[i] * gain;                  // [-127, 127]
+            int dacVal = (int)(s + 128.0);            // [0, 255]
             dacWrite(SPEAKER_PIN, (uint8_t)constrain(dacVal, 0, 255));
-            delayMicroseconds(125);
+            delayMicroseconds(125);                   // 8 kHz
 
             if ((i & 0x1F) == 0x1F) taskYIELD();
         }

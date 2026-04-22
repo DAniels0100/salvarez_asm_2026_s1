@@ -254,8 +254,9 @@ def run_bridge(port_tx: str, port_rx: str, audio: np.ndarray, verbose: bool):
             print(f"\r  [{bar:<20}] {pct:5.1f}%  {packets_ok} OK / {packets_fail} fail  (pkt {len(pkt)}B)",
                   end="", flush=True)
 
-            # Pequena pausa para que el receptor procese
-            time.sleep(0.01)
+            # Cadencia real del audio: N/Fs = 256/8000 = 32ms por bloque
+            # Esto permite al receptor reproducir sin gaps
+            time.sleep(0.028)
 
         print(f"\n\n  Puenteados: {packets_ok}/{total_blocks}")
         print(f"  Fallidos:   {packets_fail}/{total_blocks}")

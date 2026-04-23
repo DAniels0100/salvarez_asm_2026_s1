@@ -254,20 +254,25 @@ def run_bridge(port_tx: str, port_rx: str, audio: np.ndarray, verbose: bool):
             print(f"\r  [{bar:<20}] {pct:5.1f}%  {packets_ok} OK / {packets_fail} fail  (pkt {len(pkt)}B)",
                   end="", flush=True)
 
-            # Cadencia real del audio: N/Fs = 256/8000 = 32ms por bloque
-            # Esto permite al receptor reproducir sin gaps
-            time.sleep(0.028)
-
         print(f"\n\n  Puenteados: {packets_ok}/{total_blocks}")
         print(f"  Fallidos:   {packets_fail}/{total_blocks}")
+
+        # Mantener el puerto abierto mientras el ESP32 #2 procesa y reproduce.
+        # Si se cierra antes, el DTR/RTS puede resetear el chip.
+        # Tiempo estimado: 3s timeout + 2.5s MSE display + 0.5s tono + 7s audio = ~13s
+        WAIT_SEC = 16
+        print(f"\n  Esperando que ESP32 #2 reproduzca el audio ({WAIT_SEC}s)...")
+        for s in range(WAIT_SEC, 0, -1):
+            time.sleep(1)
+            print(f"\r  {s-1:2d}s restantes...   ", end="", flush=True)
+        print()
 
     except KeyboardInterrupt:
         print("\n\nInterrumpido.")
     finally:
-        # Dar tiempo a que el RX termine de imprimir
-        time.sleep(1)
         try: rx_stop.set()
         except: pass
+        time.sleep(0.3)
         ser_tx.close()
         ser_rx.close()
         print("Puertos cerrados.")

@@ -57,10 +57,10 @@ struct RecvPacket {
 };
 
 // -- Buffer de audio reconstruido ----------------------------
-// int8_t normalizado POR BLOQUE: cada bloque usa su propio maximo
-// para aprovechar los 8 bits completos. blockMaxes[] guarda la escala
-// original para restaurar amplitudes relativas en playback.
-static int8_t* reconBuffer = nullptr;
+// int16_t normalizado POR BLOQUE: 16 bits -> SNR cuantizacion ~90 dB
+// (vs ~14 dB con int8_t). blockMaxes[] guarda la escala original
+// para restaurar amplitudes relativas en playback.
+static int16_t* reconBuffer = nullptr;
 static float*  blockMaxes  = nullptr;  // max IFFT por bloque
 static int     allocBlocks = 0;
 
@@ -186,11 +186,11 @@ static void processBlock(const RecvPacket* pkt, int blockIdx,
     // Guardar escala del bloque para restaurar amplitudes en playback
     blockMaxes[blockIdx] = (float)blockMax;
 
-    // Normalizar al rango completo de int8_t usando el maximo del bloque.
-    // Esto evita que bloques quietos se cuanticen a cero (problema con /256 fijo).
+    // Normalizar al rango completo de int16_t usando el maximo del bloque.
+    // 16 bits -> SNR cuantizacion ~90 dB, practicamente sin perdida de precision.
     for (int i = 0; i < N; i++) {
-        int v = (int)round(fftRe[i] * 127.0 / blockMax);
-        reconBuffer[blockIdx * N + i] = (int8_t)constrain(v, -127, 127);
+        int v = (int)round(fftRe[i] * 32767.0 / blockMax);
+        reconBuffer[blockIdx * N + i] = (int16_t)constrain(v, -32767, 32767);
     }
 
     // Diagnostico cada 20 bloques
@@ -220,8 +220,9 @@ static void beep() {
 void mainTask(void* /*param*/) {
 
     // ---- Calcular cuantos bloques caben en heap libre ----
+    // Cada bloque ocupa: N*2 bytes (int16_t) + 4 bytes (blockMaxes float)
     int freeHeap = (int)ESP.getFreeHeap();
-    allocBlocks  = (freeHeap - 6144) / N;
+    allocBlocks  = (freeHeap - 6144) / (N * 2 + 4);
     allocBlocks  = constrain(allocBlocks, 1, MAX_BLOCKS);
 
     float durSec = (float)(allocBlocks * N) / 8000.0f;
@@ -231,7 +232,7 @@ void mainTask(void* /*param*/) {
     Serial.print("[INFO] Audio max:   "); Serial.print(durSec, 1); Serial.println(" s");
 
     // ---- Asignar buffers ----
-    reconBuffer = (int8_t*)malloc((size_t)allocBlocks * N);
+    reconBuffer = (int16_t*)malloc((size_t)allocBlocks * N * sizeof(int16_t));
     blockMaxes  = (float*)malloc((size_t)allocBlocks * sizeof(float));
     RecvPacket* pkt = (RecvPacket*)malloc(sizeof(RecvPacket));
 
@@ -324,7 +325,7 @@ void mainTask(void* /*param*/) {
     Serial.println();
 
     // Calcular rango real del buffer
-    int8_t bufMin = 127, bufMax = -127;
+    int16_t bufMin = 32767, bufMax = -32767;
     for (int i = 0; i < totalSamples; i++) {
         if (reconBuffer[i] < bufMin) bufMin = reconBuffer[i];
         if (reconBuffer[i] > bufMax) bufMax = reconBuffer[i];
@@ -379,10 +380,11 @@ void mainTask(void* /*param*/) {
     Serial.println("[FASE 4] Reproduciendo audio reconstruido...");
     for (int b = 0; b < blockIdx; b++) {
         // scale > 1 para bloques mas fuertes que la media → clipping en constrain()
+        // int16_t en rango +-32767; dividir por 256 para mapear a +-128 → DAC 0-255
         float scale = blockMaxes[b] / refMax;
         int   base  = b * N;
         for (int i = 0; i < N; i++) {
-            float s  = (float)reconBuffer[base + i] * scale;
+            float s  = (float)reconBuffer[base + i] * scale / 256.0f;
             int   dv = (int)(s + 128.5f);
             dacWrite(SPEAKER_PIN, (uint8_t)constrain(dv, 0, 255));
             delayMicroseconds(125);
@@ -410,6 +412,8 @@ void mainTask(void* /*param*/) {
 
 // ----------------------------------------------------------
 void setup() {
+    // Buffer grande para no perder bytes mientras el CPU hace IFFT
+    Serial.setRxBufferSize(8192);
     Serial.begin(115200);
 
     lcd.init();

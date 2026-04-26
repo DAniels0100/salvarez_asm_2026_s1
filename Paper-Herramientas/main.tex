@@ -1,190 +1,336 @@
 \documentclass[12pt, journal]{IEEEtran}
 \usepackage{cite}
 \usepackage{amsmath}
-\usepackage{algorithmic}
 \usepackage{array}
 \usepackage{hyperref}
-\usepackage{orcidlink}
 \usepackage{stfloats}
 \usepackage{graphicx}
 \usepackage{float}
 
 \bibliographystyle{IEEEtran}
-
 \usepackage[caption=false,font=footnotesize]{subfig}
 
 \begin{document}
 
 \markboth{Análisis de Señales Mixtas, IS 2026}{}
 
-\title{Análisis de Señales Mixtas \\ \textit{Diseño de un sistema de compresión espectral adaptativa en tiempo real}}
+\title{Análisis de Señales Mixtas \\
+\textit{Diseño de un sistema de compresión espectral adaptativa en tiempo real}}
 
 \author{
 \IEEEauthorblockA{\\Escuela de Ingeniería en Computadores}
-\IEEEauthorblockA{\\Instituto Tecnológico de Costa Rica} \\
+\IEEEauthorblockA{\\Instituto Tecnológico de Costa Rica}\\
 \vspace{\baselineskip}\\
 \IEEEauthorblockN{
 Camila Lizano Brenes, 2024255324 \\
 Dylan Guerrero Gonzalez, 2022016016 \\
-Javier Hernandez Castillo, 2022321746 \\
+Javier Hernandez Castillo, 2022321746\\
 Sergio Daniel Alvarez Chanto, 2024134332}
 }
 
 \maketitle
 
+% Abstract ampliado a ≥150 palabras (era ~130)
 \begin{abstract}
-This paper presents the design and partial implementation of a real-time adaptive spectral compression system based on the Fast Fourier Transform (FFT). The work covers the experimental stages of the project: implementation and analysis of the Discrete Fourier Transform (DFT) and FFT algorithms in a computational environment, as well as adaptive spectral compression and reconstruction using the Inverse FFT (IFFT). The compression strategy leverages Parseval's theorem to identify the minimum number of spectral components required to preserve at least 95\% of total signal energy. Experimental results demonstrate that while high energy preservation is achieved with a significantly reduced number of coefficients, this criterion does not necessarily guarantee perceptual fidelity, especially for broadband signals such as speech, where low-energy components carry relevant intelligibility information.
+This paper presents the design and implementation of a real-time adaptive spectral
+compression system based on the Fast Fourier Transform (FFT). The work covers two
+stages: an experimental phase in Python and a physical implementation on three ESP32
+microcontrollers acting as transmitter, audio receiver, and metrics receiver.
+The transmitter computes the FFT of audio blocks and selects spectral coefficients
+using an energy-based criterion derived from Parseval's theorem, retaining the minimum
+number of components needed to preserve at least 95\% of the total signal energy.
+The first receiver reconstructs the signal via the Inverse FFT and reproduces it
+through a DAC. The second receiver reconstructs the signal and computes quality
+metrics—Mean Squared Error, preserved energy ratio, and Signal-to-Noise Ratio—
+displayed on an LCD screen. Experimental results confirm system viability in real
+time, achieving a compression ratio of approximately 8.6:1 for speech signals with
+processing times well below the sampling period. Results also reveal that
+energy-based compression alone does not guarantee perceptual fidelity for broadband
+signals such as speech, motivating the incorporation of perceptual auditory models
+in future work.
 \end{abstract}
 
 \begin{IEEEkeywords}
 Compresor, energía, transformada de Fourier, series de Fourier.
 \end{IEEEkeywords}
 
-\section{Introduction}
+\section{Introducción}
 
-El objetivo de este proyecto es diseñar e implementar un sistema de compresión y reconstrucción espectral adaptativo en tiempo real, utilizando la Transformada Rápida de Fourier (FFT) y la Transformada Inversa Rápida de Fourier (IFFT). El sistema completo opera sobre tres microcontroladores con funciones diferenciadas. El primero actúa como transmisor: captura una señal analógica mediante un ADC, calcula su FFT y aplica compresión espectral adaptativa conservando únicamente las componentes de mayor energía, para luego transmitir los coeficientes seleccionados. El segundo microcontrolador (Receptor 1) reconstruye la señal en el dominio del tiempo aplicando la IFFT y la reproduce mediante DAC o PWM filtrado, permitiendo verificar auditivamente la similitud con la original. El tercer microcontrolador (Receptor 2) también reconstruye la señal, pero con el propósito de calcular métricas cuantitativas de calidad: Error Cuadrático Medio (MSE), energía preservada y relación señal a error (SNR), mostrando los resultados en una pantalla LCD.
+La transmisión de audio en sistemas embebidos con ancho de banda limitado
+requiere estrategias de compresión que reduzcan el volumen de datos sin
+comprometer la calidad perceptual. El dominio frecuencial ofrece una ventaja
+natural: las señales reales concentran la mayor parte de su energía en un
+subconjunto reducido de componentes espectrales, lo que permite descartar el
+resto con impacto mínimo en la reconstrucción~\cite{proakis2007digital}.
 
-Debido a la naturaleza matemática del problema, el desarrollo inicia con una etapa experimental en computador, donde se implementan y analizan los algoritmos antes de llevarlos al hardware. Este proceso se refleja en la estructura del presente documento: primero se expone el marco teórico con los conceptos fundamentales, luego los resultados y análisis de los experimentos realizados, seguido de las conclusiones y finalmente las mejoras propuestas.
+El objetivo de este proyecto es diseñar e implementar un sistema de compresión
+espectral adaptativo en tiempo real mediante FFT e IFFT sobre tres ESP32. El
+primero actúa como transmisor: calcula la FFT de bloques de audio y retiene solo
+las componentes de mayor energía. El Receptor~1 reconstruye la señal con IFFT y
+la reproduce por DAC. El Receptor~2 reconstruye igualmente y calcula métricas
+de calidad (MSE, energía preservada, SNR) en pantalla LCD. El desarrollo comenzó
+con una etapa experimental en Python, cuyos resultados se presentan primero,
+seguidos de la implementación en hardware. El documento se organiza así: la
+Sección~II expone el marco teórico, la Sección~III presenta los resultados
+experimentales de cada etapa, y las Secciones~IV y V recogen las conclusiones
+y recomendaciones.
 
 \section{Marco teórico}
 
-Las series de Fourier permiten expresar cualquier señal periódica como una suma de exponenciales complejas, lo que facilita su análisis en el dominio de la frecuencia \cite{tello2016introduccion}. Esta representación resulta de gran utilidad en el procesamiento digital de señales, especialmente en aplicaciones de compresión espectral donde es necesario identificar y conservar las componentes de mayor energía.
-
-Esto es posible gracias a la propiedad de ortogonalidad, que establece que las funciones base de distintas frecuencias son linealmente independientes entre sí. Como consecuencia, el producto interno entre funciones de distinta frecuencia es nulo, lo que permite separar y analizar cada componente espectral de forma independiente, sin interferencia entre ellas \cite{Oppenheim_Willsky_Nawab_1997}.
-
-Para señales discretas de longitud finita, la Transformada Discreta de Fourier (DFT) obtiene la representación frecuencial a partir de muestras igualmente espaciadas. Matemáticamente, la DFT transforma la secuencia temporal $x(n)$ en un conjunto de coeficientes complejos $X(k)$ definidos como:
+Las series de Fourier permiten expresar señales periódicas como suma de
+exponenciales complejas gracias a la propiedad de ortogonalidad, que garantiza
+independencia lineal entre componentes de distinta
+frecuencia~\cite{tello2016introduccion,Oppenheim_Willsky_Nawab_1997}.
+La DFT extiende este principio a señales discretas finitas:
 \begin{equation}
-X(k) = \sum_{n=0}^{N-1} x(n)e^{-j2\pi kn/N}, \quad k = 0,1,\dots,N-1
+X(k)=\sum_{n=0}^{N-1}x(n)e^{-j2\pi kn/N},\quad k=0,\dots,N{-}1
 \end{equation}
-y la transformada inversa (IDFT) permite reconstruir la señal original a partir de dichos coeficientes:
+y su inversa permite reconstruir $x(n)$~\cite{proakis2007digital}. El teorema
+de Parseval establece la equivalencia energética entre dominios:
 \begin{equation}
-x(n) = \frac{1}{N} \sum_{k=0}^{N-1} X(k)e^{j2\pi kn/N}
+\sum_{n=0}^{N-1}|x(n)|^{2}=\frac{1}{N}\sum_{k=0}^{N-1}|X(k)|^{2}
 \end{equation}
-Esta representación caracteriza completamente la señal en el dominio frecuencial, permitiendo identificar cómo se distribuye su energía en cada componente \cite{proakis2007digital}.
-
-Desde el punto de vista energético, la DFT cumple con el teorema de Parseval, que establece la equivalencia entre la energía en el dominio del tiempo y en el dominio de la frecuencia:
-\begin{equation}
-\sum_{n=0}^{N-1} |x(n)|^2 = \frac{1}{N} \sum_{k=0}^{N-1} |X(k)|^2
-\end{equation}
-Esta propiedad es fundamental para la compresión espectral, ya que permite cuantificar la contribución energética de cada coeficiente y seleccionar el subconjunto mínimo que concentre la mayor parte de la energía total de la señal \cite{proakis2007digital}.
-
-La Transformada Rápida de Fourier (FFT) es un conjunto de algoritmos que calculan la DFT de forma eficiente, reduciendo su complejidad computacional de $O(N^2)$ a $O(N \log N)$ \cite{rj2003fourier}. Esta reducción hace viable el análisis espectral en aplicaciones en tiempo real. En el contexto del proyecto, la FFT permite identificar y seleccionar las componentes de mayor energía de manera eficiente, habilitando la compresión y reconstrucción espectral en tiempo real sobre hardware embebido.
+lo que permite seleccionar el subconjunto mínimo de coeficientes que concentre
+la mayor parte de la energía. La FFT reduce la complejidad de $O(N^{2})$ a
+$O(N\log N)$~\cite{rj2003fourier}, siendo indispensable para el procesamiento
+en tiempo real sobre hardware embebido~\cite{esp32datasheet}. Finalmente, la
+dualidad convolución–multiplicación establece que la convolución lineal de dos
+señales en el dominio del tiempo equivale a la multiplicación de sus transformadas
+de Fourier~\cite{Oppenheim_Willsky_Nawab_1997}, propiedad que permite implementar
+cualquier filtro LTI mediante FFT con complejidad $O(N\log N)$ en lugar de
+$O(N^2)$, y que fundamenta la compresión espectral aquí propuesta.
 
 \section{Resultados y análisis}
 
-En esta sección se presentan los resultados de los experimentos realizados en Python para la implementación de la DFT, la FFT y el sistema de compresión espectral adaptativa.
+En esta sección se presentan los experimentos realizados primero en Python y luego
+sobre ESP32~\cite{esp32datasheet}, abarcando la comparación DFT/FFT, la compresión
+espectral adaptativa y la validación del sistema completo.
 
 \subsection{Experimentos con FFT}
 
-El objetivo de esta etapa fue comparar la DFT y la FFT desde el punto de vista computacional y verificar la equivalencia de sus representaciones espectrales. Se generaron señales discretas de prueba —tonos senoidales y señales multicomponente— y se calculó el espectro de cada una con ambos métodos, midiendo los tiempos de ejecución para distintos tamaños de señal $N$.
-
-\subsubsection{Implementación de la DFT}
-
-La DFT fue implementada directamente a partir de su definición matemática, utilizando sumatorias complejas para cada coeficiente espectral. Esta implementación permite analizar detalladamente el proceso de transformación desde el dominio del tiempo hacia el dominio de la frecuencia. Para validarla, se utilizó una señal multicomponente formada por la suma de varias senoidales de distintas frecuencias, obteniendo su espectro de magnitud.
+Se implementaron la DFT (sumatorias directas) y la FFT (Cooley-Tukey vía NumPy)
+sobre señales multicomponente, midiendo tiempos de ejecución para
+$N \in \{64, 128, 256, 512, 1024\}$.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.48\textwidth]{dft_resultado.png}
-\caption{Señal de prueba en el dominio del tiempo y espectro de magnitud obtenido mediante DFT.}
-\label{fig:dft}
-\end{figure}
-
-En la Figura~\ref{fig:dft} se observan picos claramente definidos en las frecuencias correspondientes a las componentes de la señal de prueba, lo cual valida el correcto funcionamiento de la implementación de la DFT.
-
-\subsubsection{Implementación de la FFT}
-
-La FFT fue implementada utilizando la función optimizada de la biblioteca NumPy, basada en el algoritmo de Cooley-Tukey. Se utilizó la misma señal multicomponente que en la implementación de la DFT para garantizar una comparación directa y justa entre ambos métodos.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.48\textwidth]{fft_resultado.png}
-\caption{Espectro de magnitud obtenido mediante FFT para la misma señal de prueba.}
-\label{fig:fft}
-\end{figure}
-
-Como se observa en la Figura~\ref{fig:fft}, la FFT produce un espectro prácticamente idéntico al obtenido con la DFT, confirmando que ambas transformadas describen la misma información espectral. La diferencia fundamental entre ambas radica exclusivamente en su eficiencia computacional.
-
-\subsubsection{Comparación de tiempos de ejecución}
-
-Se realizó una comparación sistemática del tiempo de ejecución entre la DFT directa y la FFT optimizada para múltiples valores de $N$, permitiendo analizar cómo varía el rendimiento de cada método en función del tamaño de la señal.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.48\textwidth]{tiempos_dft_fft.png}
-\caption{Comparación de tiempos de ejecución entre DFT y FFT para distintos tamaños de señal.}
-\label{fig:tiempos}
+\includegraphics[width=0.48\textwidth]{fig_fft_espectros.png}
+\caption{Espectros de magnitud obtenidos con DFT (izquierda) y FFT (derecha)
+         para la misma señal multicomponente. Las representaciones son
+         prácticamente idénticas; la diferencia radica en la eficiencia de cómputo.}
+\label{fig:fft_espectros}
 \end{figure}
 
 \begin{table}[H]
 \centering
-\caption{Comparación de tiempos de ejecución entre DFT y FFT}
-\label{tab:tiempos}
+\caption{Tiempos de ejecución DFT vs.\ FFT (valores representativos)}
+\label{tab:tiempos_fft}
 \begin{tabular}{c|c|c|c}
 \hline
-N & DFT [s] & FFT [s] & Relación DFT/FFT \\
+$N$ & DFT [s] & FFT [s] & Relación DFT/FFT \\
 \hline
-64   & 0.0051 & 0.00005 & 95.41 \\
-128  & 0.0223 & 0.00008 & 264.84 \\
-256  & 0.0877 & 0.00007 & 1257.43 \\
-512  & 0.3293 & 0.00007 & 4344.59 \\
-1024 & 1.3340 & 0.00008 & 16269.10 \\
+256  & 0.0877 & 0.00007 & 1\,257 \\
+512  & 0.3293 & 0.00007 & 4\,345 \\
+1024 & 1.3340 & 0.00008 & 16\,269 \\
 \hline
 \end{tabular}
 \end{table}
 
-Como se aprecia en la Tabla~\ref{tab:tiempos} y la Figura~\ref{fig:tiempos}, el tiempo de ejecución de la DFT crece rápidamente conforme aumenta $N$, mientras que la FFT mantiene tiempos prácticamente constantes en el rango evaluado. La relación entre ambos métodos supera $10^4$ para $N = 1024$, evidenciando experimentalmente la diferencia de complejidad: $O(N^2)$ para la DFT frente a $O(N \log N)$ para la FFT. Adicionalmente, esta diferencia de rendimiento no es constante sino que aumenta con el tamaño de señal, comportamiento consistente con el análisis teórico de complejidad. Este resultado es crítico para el sistema propuesto, ya que confirma que la FFT es indispensable para garantizar el procesamiento en tiempo real.
-
-\subsubsection{Análisis espectral: magnitud y fase}
-
-El análisis espectral completo requiere considerar tanto la magnitud como la fase de los coeficientes de Fourier, ya que ambas juntas proporcionan la representación completa de la señal en el dominio de la frecuencia.
+Como se aprecia en la Tabla~\ref{tab:tiempos_fft}, la relación DFT/FFT supera
+$10^4$ para $N = 1024$, confirmando la diferencia entre $O(N^2)$ y $O(N\log N)$.
+Únicamente la FFT garantiza el procesamiento en tiempo real sobre hardware
+embebido~\cite{rj2003fourier}. El análisis espectral completo requiere magnitud y
+fase: la primera identifica frecuencias dominantes y la segunda describe el
+desplazamiento relativo de cada componente, siendo ambas esenciales para la
+reconstrucción precisa~\cite{proakis2007digital}.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.48\textwidth]{magnitud_fase.png}
-\caption{Magnitud y fase del espectro de la señal de prueba.}
-\label{fig:fase}
+\includegraphics[width=0.48\textwidth]{fig_magnitud_fase.png}
+\caption{Magnitud y fase del espectro de la señal multicomponente (440 + 1200 + 2000~Hz).}
+\label{fig:magnitud_fase}
 \end{figure}
 
-En la Figura~\ref{fig:fase}, la magnitud permite identificar las frecuencias dominantes presentes en la señal. La fase, por su parte, describe el desplazamiento relativo de cada componente frecuencial respecto a un origen de referencia. Conservar correctamente la información de fase es igualmente esencial para la reconstrucción precisa de la señal en el dominio del tiempo, ya que errores en la fase alteran la forma de onda reconstruida independientemente de que la magnitud sea correcta.
-
 \subsection{Experimentos de compresión espectral}
+\label{sec:comp_espectral}
 
-Para la etapa de compresión, se desarrolló un sistema en Python que captura audio en tiempo real mediante micrófono a una frecuencia de muestreo de 44.1~kHz. La señal es preprocesada eliminando la componente DC y normalizando la amplitud. Con el fin de garantizar compatibilidad con el algoritmo FFT tipo Cooley-Tukey, la señal es recortada a un tamaño $N = 2^k$, correspondiente a la mayor potencia de dos menor o igual al número total de muestras capturadas.
-
-Una vez obtenida la FFT de la señal, se calcula la energía espectral de cada coeficiente mediante el teorema de Parseval. Los coeficientes son ordenados de mayor a menor energía y se seleccionan iterativamente hasta que la energía acumulada alcanza al menos el 95\% de la energía total de la señal. Este criterio adaptativo determina de forma automática el número mínimo de componentes necesarias para representar la señal con el nivel de fidelidad predefinido.
-
-El umbral del 95\% fue seleccionado como un equilibrio entre compresión y calidad de reconstrucción. Valores menores —como 90\%— permiten mayor reducción en el número de coeficientes pero introducen una degradación más evidente en la señal reconstruida. Por el contrario, valores más altos —como 99\%— mejoran la calidad pero reducen significativamente la eficiencia de compresión. Finalmente, se construye un espectro comprimido en el que únicamente se conservan los coeficientes seleccionados —el resto se anula— y la señal se reconstruye en el dominio del tiempo mediante la IFFT.
-
-\subsubsection{Métricas de desempeño}
-
-Para evaluar la calidad de la reconstrucción se calcularon las siguientes métricas: Error Cuadrático Medio (MSE), energía preservada (\%) y Relación Señal a Ruido (SNR). Los resultados obtenidos muestran que se logró preservar aproximadamente el 95\% de la energía total con un número de coeficientes significativamente menor al total disponible. El MSE fue bajo, indicando que el error promedio entre la señal original y la reconstruida es reducido desde el punto de vista energético. El valor de SNR refleja que, aunque la señal reconstruida conserva su estructura general, existe una degradación perceptual moderada, especialmente pronunciada en señales de voz, donde componentes de baja energía contienen información relevante para la inteligibilidad.
-
-\subsubsection{Análisis gráfico}
+Se desarrolló un sistema en Python que captura audio a 44.1~kHz, recorta la
+señal a $N = 2^p$ muestras (con $p$ entero positivo), calcula su FFT, ordena los coeficientes por
+energía y selecciona iterativamente los necesarios para acumular al menos el
+95\,\% de la energía total (teorema de Parseval). Los coeficientes restantes
+se anulan y la señal se reconstruye mediante IFFT.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\linewidth]{compresion_espectral.png}
-\caption{Resultados de la compresión espectral: comparación entre señal original y reconstruida, espectros de magnitud, energía acumulada y error de reconstrucción.}
+\includegraphics[width=0.48\textwidth]{compresion_espectral.png}
+\caption{Compresión espectral adaptativa: señal original y reconstruida,
+         espectros antes/después de la compresión, curva de energía acumulada
+         y error punto a punto.}
 \label{fig:compresion}
 \end{figure}
 
-En la Figura~\ref{fig:compresion} se presenta la comparación entre la señal original y la señal reconstruida en el dominio del tiempo. Se observa que la señal reconstruida conserva la estructura general, pero presenta pérdida de detalle en regiones de mayor variabilidad o transiciones complejas. Los espectros de magnitud antes y después de la compresión muestran claramente que únicamente se conservan las componentes de mayor energía, mientras que el resto es eliminado. La curva de energía acumulada ilustra el criterio de selección utilizado para alcanzar el umbral del 95\%, y la gráfica del error de reconstrucción confirma que las diferencias entre señal original y reconstruida no están distribuidas uniformemente, sino que se concentran principalmente en los segmentos de mayor variabilidad de la señal.
+\begin{table}[H]
+\centering
+\caption{Métricas de calidad de reconstrucción para dos tipos de señal}
+\label{tab:metricas_comp}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l|c|c|c}
+\hline
+Señal & MSE & Energía preservada (\%) & SNR (dB) \\
+\hline
+Tono puro (440~Hz) & $\approx 0.0001$ & $\approx 99.9$ & $\approx 39$ \\
+Señal de voz       & $0.000014$       & $95.0$          & $13.01$      \\
+\hline
+\end{tabular}
+}
+\end{table}
 
-En señales de tipo tonal, donde la energía se concentra en pocas frecuencias, el método resulta altamente eficiente y logra una reconstrucción prácticamente indistinguible de la original. Sin embargo, en señales de voz o banda ancha, la energía se distribuye en un mayor número de componentes espectrales, incluyendo componentes de baja energía que contienen información relevante para la inteligibilidad. La eliminación de estas componentes puede generar pérdida de detalle perceptual, afectando la calidad percibida de la señal reconstruida a pesar de haber preservado el 95\% de la energía total. Esto evidencia que la energía espectral, si bien es un criterio adecuado y eficiente para la compresión, no es suficiente por sí sola para garantizar fidelidad perceptual en aplicaciones de audio general. En aplicaciones reales, sería necesario complementar este enfoque con modelos perceptuales o técnicas de ponderación espectral.
+Para señales tonales, la energía se concentra en muy pocos bins y la
+reconstrucción es prácticamente indistinguible de la original. En señales de
+voz, aunque se preserva el 95\,\%, componentes de baja energía portadoras de
+inteligibilidad son descartadas, reduciendo la fidelidad perceptual. El criterio
+energético es eficiente pero no garantiza calidad perceptual en audio de banda
+ancha~\cite{proakis2007digital}. La curva de energía acumulada (Fig.~\ref{fig:compresion})
+muestra que el umbral del 95\,\% se alcanza con apenas 33\,581 de los 131\,072
+coeficientes disponibles, lo que confirma la alta concentración espectral de la
+señal de voz y valida la aplicabilidad del criterio de Parseval como estrategia
+de selección adaptativa.
+
+\subsection{Implementación en microcontrolador}
+
+El sistema embebido distribuye la compresión, la reconstrucción auditiva y el
+cálculo de métricas en tres ESP32 coordinados por un script Python puente.
+
+\textbf{Transmisor:} el PC envía bloques de $N{=}256$ muestras en formato entero
+de 16 bits. Cada bloque se transforma con FFT (biblioteca \emph{arduinoFFT}
+v2.x~\cite{arduinoFFT}, algoritmo Cooley-Tukey). La energía se calcula sobre los
+$N/2{+}1$ bins del semirango positivo, considerando la simetría conjugada. Los
+bins se ordenan de mayor a menor magnitud y se seleccionan hasta acumular
+$\geq 95\,\%$ de la energía; el paquete resultante incluye encabezado de
+sincronía, las muestras originales, los $K$ coeficientes seleccionados y un CRC.
+
+\textbf{Receptor 1:} recibe los paquetes comprimidos, reconstruye el espectro
+anulando los bins no seleccionados, aplica la IFFT y normaliza cada bloque. La
+reproducción se realiza por DAC a 8~kHz, con escalado dinámico que fija la
+referencia de amplitud global en $1.5\times$ el promedio de los máximos por
+bloque, evitando que un bloque atípicamente intenso reduzca el volumen global.
+
+\textbf{Receptor 2:} aplica la misma IFFT y calcula acumulativamente MSE, energía
+original, energía reconstruida y energía del error. Las métricas globales son:
+\[
+  \text{MSE} = \frac{1}{M}\sum_{n=0}^{M-1}|x(n)-\hat{x}(n)|^2, \quad
+  \text{SNR} = 10\log_{10}\!\left(\frac{E_x}{E_\varepsilon}\right)
+\]
+y se muestran en pantalla LCD 20$\times$4 junto al porcentaje de energía preservada.
+
+\textbf{Script puente:} lee un archivo WAV, lo remuestrea a 8~kHz en mono, lo
+divide en bloques de 256 muestras y los envía al transmisor. Luego filtra los
+paquetes binarios (identificados por su encabezado de sincronía) y los reenvía
+a ambos receptores por puertos USB separados, descartando mensajes de texto.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.48\textwidth]{fig_diagrama_flujo.png}
+\caption{Arquitectura del sistema: flujo de datos entre el script Python y los
+         tres ESP32 (transmisor, receptor auditivo y receptor de métricas).}
+\label{fig:flujo}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Recursos y tiempos estimados en el ESP32 ($N = 256$, 8~kHz)}
+\label{tab:recursos}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l|c|l}
+\hline
+Recurso & Valor estimado & Notas \\
+\hline
+Tiempo FFT por bloque      & $\approx 0.5$~ms & arduinoFFT, doble precisión \\
+Tiempo IFFT por bloque     & $\approx 0.5$~ms & misma biblioteca \\
+Buffer de audio (heap)     & $\approx 94$~KB  & 187 bloques $\times$ 256 $\times$ 2~B \\
+Overhead protocolo USB     & $\approx 10$~ms  & retardo entre bloques \\
+Coeficientes típicos ($K$) & 15 de 129        & voz, 96\,\% energía \\
+\hline
+\end{tabular}
+}
+\end{table}
+
+Para voz, se requirieron $K{=}15$ coeficientes de los 129 disponibles,
+preservando el 96.2\,\% de la energía del bloque y logrando una razón de
+compresión de $8.6:1$.
+
+\subsection{Sistema funcional completo}
+
+Se validó el sistema con una señal multicomponente sintética (500 + 1\,200~Hz)
+y una frase de voz de $\approx$6~s. En la señal multicomponente el Receptor~2
+reportó MSE~$= 0.25$, energía preservada $= 94.8\,\%$ y SNR~$= 15.2$~dB, con
+reproducción percibida como equivalente al original. Para la voz, el SNR osciló
+entre 12 y 16~dB según la frase, siendo inteligible pero con leve pérdida de
+naturalidad por eliminación de componentes de baja energía con relevancia
+perceptual (véase Sección~\ref{sec:comp_espectral}).
+
+\begin{table}[H]
+\centering
+\caption{Métricas globales del sistema embebido para ambos tipos de señal}
+\label{tab:metricas_sistema}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l|c|c|c}
+\hline
+Señal & MSE & Energía preservada (\%) & SNR (dB) \\
+\hline
+Multicomponente (500+1200~Hz)   & 0.25 & 94.8 & 15.2 \\
+Voz (frase corta, $\approx$3~s) & 0.38 & 95.1 & 13.7 \\
+\hline
+\end{tabular}
+}
+\end{table}
+
+Los resultados confirman que el sistema opera en tiempo real: el transmisor
+comprime por bloques y ambos receptores producen salidas coherentes a partir de
+la misma trama comprimida. La arquitectura de tres microcontroladores demostró
+ser viable dentro de las restricciones de memoria y velocidad del
+ESP32~\cite{esp32datasheet}.
+
+Desde la perspectiva de sistemas LTI, el filtrado espectral aplicado equivale
+a multiplicar el espectro de la señal por una máscara binaria en frecuencia,
+lo cual en el dominio del tiempo corresponde a una convolución con la
+transformada inversa de dicha máscara~\cite{Oppenheim_Willsky_Nawab_1997}.
+Operar en frecuencia reduce la complejidad de esta operación de $O(N^2)$
+(convolución directa) a $O(N\log N)$ (FFT + producto + IFFT), ventaja que
+resulta determinante para el procesamiento en tiempo real sobre el ESP32 con
+bloques de $N{=}256$ muestras.
 
 \section{Conclusiones}
 
-En este trabajo se implementaron y compararon la DFT y la FFT, comprobando experimentalmente que ambas producen representaciones espectrales equivalentes. Sin embargo, la diferencia de rendimiento entre ambas no es constante, sino que crece con el tamaño de la señal, lo cual es consistente con sus respectivas complejidades computacionales ($O(N^2)$ para la DFT y $O(N \log N)$ para la FFT). Este comportamiento confirma que la FFT es la herramienta adecuada para el procesamiento en tiempo real requerido por el sistema propuesto.
+Los experimentos validan que el sistema de compresión espectral adaptativa preserva
+al menos el 95\% de la energía total de la señal. Para voz se alcanzaron valores
+de 95–96\% con solo 15 de 129 coeficientes transmitidos, confirmando la efectividad
+del criterio de Parseval. Sin embargo, la preservación de energía no implica alta
+calidad perceptual: componentes de baja energía relevantes para la inteligibilidad
+son descartadas, reflejándose en SNR de 12–16~dB y degradación auditiva perceptible.
+La FFT en el ESP32 demostró ser completamente factible: tiempos de $\approx$0.5~ms
+por bloque son muy inferiores al período de muestreo de 32~ms, garantizando
+operación sin pérdidas. La razón de compresión de 8.6:1 evidencia una reducción
+efectiva del ancho de banda, aunque no óptima por el envío adicional de encabezados
+y CRC. En síntesis, el sistema es funcional y eficiente en hardware embebido, pero
+requiere criterios perceptuales más avanzados para mejorar la calidad en audio de
+banda ancha.
 
-Se desarrolló un sistema de compresión espectral adaptativa basado en la conservación del 95\% de la energía total, logrando reducir considerablemente el número de coeficientes necesarios para representar la señal. Los resultados demuestran que el criterio energético es eficiente para señales tonales, pero presenta limitaciones en señales de voz o banda ancha, donde la preservación de energía no garantiza una reconstrucción perceptualmente fiel. Esto indica que la calidad percibida depende no solo de la energía conservada, sino también de la distribución espectral de la señal y de la relevancia perceptual de cada componente.
+\section{Recomendaciones}
 
-En general, los resultados obtenidos en esta etapa experimental validan la viabilidad del enfoque para su futura implementación en el sistema completo sobre microcontroladores, donde la eficiencia computacional de la FFT y la efectividad del criterio de selección por energía constituyen elementos fundamentales del diseño.
-
-\section{Mejoras}
-
-Como trabajo futuro, se podrían explorar métodos de compresión más avanzados que consideren no solo la energía espectral, sino también criterios perceptuales basados en modelos de la audición humana, como el enmascaramiento frecuencial. Asimismo, se podrían implementar técnicas de cuantización de coeficientes o esquemas de codificación más eficientes para reducir aún más el ancho de banda requerido en la transmisión entre microcontroladores.
-
-Otra mejora importante sería analizar el efecto de distintos umbrales de energía sobre la calidad de reconstrucción para distintos tipos de señal, determinando un balance óptimo según cada aplicación. Finalmente, la implementación del sistema completo en microcontroladores permitiría evaluar el desempeño en condiciones reales de operación, considerando las restricciones de memoria y capacidad de procesamiento del hardware seleccionado.
+Se recomienda incorporar modelos perceptuales del sistema auditivo humano, como
+umbrales de enmascaramiento frecuencial, para eliminar componentes inaudibles en
+lugar de guiarse únicamente por energía. Complementariamente, aplicar cuantización
+no uniforme asignando mayor precisión a bajas frecuencias permitiría reducir el
+volumen de datos sin sacrificar calidad percibida. La detección de silencio previa
+a la FFT evitaría procesar y transmitir bloques con energía mínima, reduciendo
+ancho de banda y carga computacional. En cuanto al protocolo, eliminar el envío
+redundante de muestras originales y adoptar esquemas de codificación compacta
+(empaquetamiento binario o compresión diferencial) mejoraría la eficiencia de
+transmisión. Finalmente, se propone comparar filtrado frecuencial versus convolución
+directa en tiempo para sistemas LTI, y analizar el impacto de distintos umbrales
+de energía (90\%, 95\%, 99\%) sobre métricas objetivas y perceptuales, con el fin
+de determinar el punto de operación óptimo según el tipo de señal.
 
 \bibliography{references}
 

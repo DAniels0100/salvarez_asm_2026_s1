@@ -22,20 +22,20 @@ clear; clc; close all;
 %  Reemplaza con tus valores medidos experimentalmente.
 % =========================================================
 
-Ra   = 5.0;    % [Ohm]        Resistencia de armadura
-Kt   = 0.03;   % [N*m/A]     Constante de torque
-Kb   = 0.03;   % [V*s/rad]   Constante de back-EMF
-J    = 0.002;  % [kg*m^2]    Momento de inercia
-B    = 0.001;  % [N*m*s/rad] Friccion viscosa
+Ra   = 5.0;    % [Ohm]        Resistencia de armadura (medir con multimetro)
+Kt   = 0.02;   % [N*m/A]     Constante de torque (estimado, motor hobby sin hoja de datos)
+Kb   = 0.02;   % [V*s/rad]   Constante de back-EMF (= Kt en motor DC ideal)
+J    = 0.0005; % [kg*m^2]    Momento de inercia (cabina de papel + polea pequena, sin carga)
+B    = 0.0001; % [N*m*s/rad] Friccion viscosa (despreciable, cabina de papel)
 
 KPWM = 1.0;
 KPH  = 0.95;
 Kpot = 0.5;    % [V/rad] calibrar con el potenciometro real
 
 % Parametros de simulacion
-t_final = 5.0;
+t_final = 3.0;   % [s] 60 cm se recorre rapido con motor de hobby
 dt      = 0.001;
-A_step  = 6.0;   % [V] amplitud del escalon
+A_step  = 6.0;   % [V] amplitud del escalon (voltaje de alimentacion del L298N)
 
 % =========================================================
 %  SECCION 2: Calculo del modelo
